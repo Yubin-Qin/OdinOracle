@@ -4,7 +4,7 @@ LangChain tools for stock price fetching and news search.
 
 from langchain_core.tools import tool
 import yfinance as yf
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from typing import Optional
 import logging
 
