@@ -6,8 +6,11 @@ Portfolio tracking, AI assistant, and price monitoring dashboard.
 import streamlit as st
 import os
 import pandas as pd
+import logging
 from datetime import date, datetime
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 from database import (
     init_db, get_session, add_asset, get_all_assets, get_asset_by_id,
@@ -47,6 +50,9 @@ if "agent_executor" not in st.session_state:
 if "llm_initialized" not in st.session_state:
     st.session_state.llm_initialized = False
 
+if "market_report" not in st.session_state:
+    st.session_state.market_report = None
+
 
 # ==================== HELPER FUNCTIONS ====================
 def send_test_email(to_address: str) -> bool:
@@ -62,6 +68,61 @@ def send_test_email(to_address: str) -> bool:
         )
     except Exception as e:
         st.error(f"Failed to send test email: {e}")
+        return False
+
+
+def send_market_report_email(to_address: str, report: str) -> bool:
+    """Send the daily market report via email."""
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    SMTP_SERVER = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
+    SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
+    SMTP_USERNAME = os.getenv('SMTP_USERNAME')
+    SMTP_PASSWORD = os.getenv('SMTP_PASSWORD')
+    FROM_EMAIL = os.getenv('FROM_EMAIL', SMTP_USERNAME)
+
+    if not all([SMTP_USERNAME, SMTP_PASSWORD, to_address]):
+        return False
+
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = f"📊 OdinOracle Daily Market Briefing - {date.today().isoformat()}"
+        msg['From'] = FROM_EMAIL
+        msg['To'] = to_address
+
+        # Create HTML email body
+        html_content = f"""
+        <html>
+        <body>
+            <h2>📈 OdinOracle Daily Market Briefing</h2>
+            <p><strong>Date:</strong> {date.today().strftime('%Y-%m-%d')}</p>
+
+            <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin-top: 20px;">
+                <h3>Report Summary:</h3>
+                <pre style="white-space: pre-wrap; font-family: Arial, sans-serif; font-size: 14px; line-height: 1.6;">{report}</pre>
+            </div>
+
+            <p style="margin-top: 30px; color: gray; font-size: 12px;">
+                <em>This is an automated message from OdinOracle Market Intelligence.</em>
+            </p>
+        </body>
+        </html>
+        """
+
+        part = MIMEText(html_content, 'html')
+        msg.attach(part)
+
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(msg)
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to send market report email: {e}")
         return False
 
 
@@ -468,17 +529,33 @@ def render_market_intel():
 
         with st.spinner("Fetching market data and generating analysis..."):
             report = generate_market_report()
+            st.session_state.market_report = report
 
         st.markdown("---")
         st.markdown("### 📑 Daily Briefing Report")
         st.markdown(report)
 
-        st.download_button(
-            label="📥 Download Report",
-            data=report,
-            file_name=f"daily_briefing_{date.today().isoformat()}.txt",
-            mime="text/plain"
-        )
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                label="📥 Download Report",
+                data=report,
+                file_name=f"daily_briefing_{date.today().isoformat()}.txt",
+                mime="text/plain"
+            )
+        with col2:
+            # Send to Email button
+            prefs = get_user_preferences()
+            if prefs and prefs.email_address:
+                if st.button("📧 Send to Email", use_container_width=True):
+                    with st.spinner("Sending email..."):
+                        if send_market_report_email(prefs.email_address, report):
+                            st.success(f"✅ Report sent to {prefs.email_address}!")
+                        else:
+                            st.error("❌ Failed to send email. Check SMTP settings.")
+            else:
+                st.button("📧 Send to Email", use_container_width=True, disabled=True)
+                st.info("⚠️ Configure email in sidebar first")
 
 
 def render_technical_analysis():
