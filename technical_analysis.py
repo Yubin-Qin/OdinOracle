@@ -1,30 +1,17 @@
 """
 Technical Analysis Module for OdinOracle.
 Calculates RSI, SMA, and generates buy/sell/hold signals.
+Refactored to use services layer.
 """
 
-import yfinance as yf
 import pandas as pd
-from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 import logging
 
+from services.market_data import MarketDataService
+from services.common import normalize_symbol
+
 logger = logging.getLogger(__name__)
-
-
-def get_yfinance_symbol(symbol: str, market_type: str) -> str:
-    """Convert symbol to yfinance format."""
-    if market_type == "US":
-        return symbol
-    elif market_type == "HK":
-        if not symbol.endswith(".HK"):
-            return f"{symbol}.HK"
-        return symbol
-    elif market_type == "CN":
-        if symbol.endswith((".SS", ".SZ")):
-            return symbol
-        return f"{symbol}.SS"
-    return symbol
 
 
 def calculate_rsi(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -83,17 +70,12 @@ def get_technical_indicators(symbol: str, market_type: str = "US",
             - history_df: DataFrame with price and SMA data
     """
     try:
-        yf_symbol = get_yfinance_symbol(symbol, market_type)
-        logger.info(f"Fetching technical data for {yf_symbol}")
+        logger.info(f"Fetching technical data for {symbol}")
 
-        # Fetch historical data
-        ticker = yf.Ticker(yf_symbol)
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=period_months * 30)
+        # Fetch historical data using MarketDataService (cached)
+        hist = MarketDataService.get_historical_data(symbol, market_type, period_months)
 
-        hist = ticker.history(start=start_date, end=end_date)
-
-        if hist.empty:
+        if hist is None or hist.empty:
             logger.warning(f"No historical data for {symbol}")
             return None
 

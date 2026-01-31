@@ -1,42 +1,16 @@
 """
 LangChain tools for stock price fetching and news search.
+Refactored to use services layer.
 """
 
 from langchain_core.tools import tool
-import yfinance as yf
-from ddgs import DDGS
 from typing import Optional
 import logging
 
+from services.market_data import MarketDataService
+from services.common import normalize_symbol
+
 logger = logging.getLogger(__name__)
-
-
-def get_yfinance_symbol(symbol: str, market_type: str) -> str:
-    """
-    Convert a symbol to yfinance format based on market type.
-
-    Args:
-        symbol: Stock symbol (e.g., "NVDA", "0700", "600519")
-        market_type: Market type ("US", "HK", "CN")
-
-    Returns:
-        Properly formatted yfinance symbol
-    """
-    if market_type == "US":
-        return symbol  # US stocks don't need suffix
-    elif market_type == "HK":
-        # HK stocks need .HK suffix
-        if not symbol.endswith(".HK"):
-            return f"{symbol}.HK"
-        return symbol
-    elif market_type == "CN":
-        # CN stocks need .SS (Shanghai) or .SZ (Shenzhen) suffix
-        if symbol.endswith((".SS", ".SZ")):
-            return symbol
-        # Default to .SS for simplicity (user should specify if different)
-        return f"{symbol}.SS"
-    else:
-        return symbol
 
 
 @tool
@@ -52,29 +26,24 @@ def get_stock_price(symbol: str, market_type: str = "US") -> str:
         String with stock price information
     """
     try:
-        yf_symbol = get_yfinance_symbol(symbol, market_type)
-        logger.info(f"Fetching data for {yf_symbol}")
+        logger.info(f"Fetching price for {symbol}")
 
-        ticker = yf.Ticker(yf_symbol)
-        info = ticker.info
+        # Get stock info from MarketDataService
+        info = MarketDataService.get_stock_info(symbol, market_type)
 
-        # Get current price from different possible fields
-        current_price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('lastPrice')
+        if not info:
+            return f"Could not retrieve information for {symbol}"
 
+        current_price = info.get('current_price')
         if current_price is None:
-            # Try to get from history
-            hist = ticker.history(period="1d")
-            if not hist.empty:
-                current_price = hist['Close'].iloc[-1]
-            else:
-                return f"Could not retrieve price for {symbol}"
+            return f"Could not retrieve price for {symbol}"
 
-        previous_close = info.get('previousClose')
-        day_high = info.get('dayHigh')
-        day_low = info.get('dayLow')
+        previous_close = info.get('previous_close')
+        day_high = info.get('day_high')
+        day_low = info.get('day_low')
         volume = info.get('volume')
 
-        result = f"Stock: {symbol} ({yf_symbol})\n"
+        result = f"Stock: {symbol} ({info.get('yf_symbol', symbol)})\n"
         result += f"Current Price: ${current_price:.2f}\n"
 
         if previous_close:
@@ -110,9 +79,9 @@ def search_stock_news(query: str, max_results: int = 5) -> str:
     """
     try:
         logger.info(f"Searching news for query: {query}")
-        ddgs = DDGS()
+        from ddgs import DDGS
 
-        # Search for news
+        ddgs = DDGS()
         results = ddgs.news(query, max_results=max_results)
 
         if not results:
@@ -150,19 +119,21 @@ def get_stock_info(symbol: str, market_type: str = "US") -> str:
         String with detailed company information
     """
     try:
-        yf_symbol = get_yfinance_symbol(symbol, market_type)
-        logger.info(f"Fetching info for {yf_symbol}")
+        logger.info(f"Fetching info for {symbol}")
 
-        ticker = yf.Ticker(yf_symbol)
-        info = ticker.info
+        # Get stock info from MarketDataService
+        info = MarketDataService.get_stock_info(symbol, market_type)
 
-        company_name = info.get('longName') or info.get('shortName') or symbol
+        if not info:
+            return f"Could not retrieve information for {symbol}"
+
+        company_name = info.get('name') or symbol
         sector = info.get('sector', 'N/A')
         industry = info.get('industry', 'N/A')
-        market_cap = info.get('marketCap')
-        dividend_yield = info.get('dividendYield')
-        pe_ratio = info.get('trailingPE')
-        eps = info.get('trailingEps')
+        market_cap = info.get('market_cap')
+        dividend_yield = info.get('dividend_yield')
+        pe_ratio = info.get('pe_ratio')
+        eps = info.get('eps')
 
         result = f"Company: {company_name}\n"
         result += f"Symbol: {symbol}\n"
@@ -179,7 +150,7 @@ def get_stock_info(symbol: str, market_type: str = "US") -> str:
             result += f"Dividend Yield: {dividend_yield * 100:.2f}%\n"
 
         # Business summary
-        summary = info.get('longBusinessSummary')
+        summary = info.get('summary')
         if summary:
             result += f"\nBusiness Summary:\n{summary[:500]}...\n"
 

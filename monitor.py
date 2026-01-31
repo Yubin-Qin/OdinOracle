@@ -1,21 +1,19 @@
 """
 Background price monitoring script using APScheduler.
 Runs periodically to check stock prices and send email alerts.
+Refactored to use services layer.
 """
 
-import smtplib
 import time
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import logging
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-import logging
-import os
 from dotenv import load_dotenv
 
-import yfinance as yf
-from database import get_session, get_all_assets, get_user_preferences
+from database import get_all_assets, get_user_preferences
+from services.market_data import MarketDataService
+from services.notification import EmailService
 
 # Load environment variables
 load_dotenv()
@@ -28,147 +26,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Email configuration (from environment variables)
-SMTP_SERVER = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
-SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
-SMTP_USERNAME = os.getenv('SMTP_USERNAME')
-SMTP_PASSWORD = os.getenv('SMTP_PASSWORD')
-FROM_EMAIL = os.getenv('FROM_EMAIL', SMTP_USERNAME)
-
-
-def get_yfinance_symbol(symbol: str, market_type: str) -> str:
-    """Convert symbol to yfinance format."""
-    if market_type == "US":
-        return symbol
-    elif market_type == "HK":
-        if not symbol.endswith(".HK"):
-            return f"{symbol}.HK"
-        return symbol
-    elif market_type == "CN":
-        if symbol.endswith((".SS", ".SZ")):
-            return symbol
-        return f"{symbol}.SS"
-    return symbol
-
-
-def get_current_price(symbol: str, market_type: str) -> float:
-    """
-    Fetch current stock price using yfinance.
-
-    Args:
-        symbol: Stock symbol
-        market_type: Market type (US, HK, CN)
-
-    Returns:
-        Current price as float, or None if unavailable
-    """
-    try:
-        yf_symbol = get_yfinance_symbol(symbol, market_type)
-        logger.info(f"Fetching price for {yf_symbol}")
-
-        ticker = yf.Ticker(yf_symbol)
-        info = ticker.info
-
-        # Try multiple price fields
-        price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('lastPrice')
-
-        if price is None:
-            # Fallback to historical data
-            hist = ticker.history(period="1d")
-            if not hist.empty:
-                price = hist['Close'].iloc[-1]
-
-        if price:
-            logger.info(f"{symbol}: ${price:.2f}")
-            return float(price)
-
-        logger.warning(f"Could not retrieve price for {symbol}")
-        return None
-
-    except Exception as e:
-        logger.error(f"Error fetching price for {symbol}: {e}")
-        return None
-
-
-def send_email_alert(to_email: str, asset_name: str, symbol: str,
-                     current_price: float, threshold: float) -> bool:
-    """
-    Send an email alert for price threshold breach.
-
-    Args:
-        to_email: Recipient email address
-        asset_name: Name of the asset
-        symbol: Stock symbol
-        current_price: Current stock price
-        threshold: Alert threshold price
-
-    Returns:
-        True if email sent successfully, False otherwise
-    """
-    if not all([SMTP_USERNAME, SMTP_PASSWORD, to_email]):
-        logger.error("Missing email configuration. Cannot send alert.")
-        return False
-
-    try:
-        # Create message
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = f"🚨 Price Alert: {asset_name} ({symbol}) - ${current_price:.2f}"
-        msg['From'] = FROM_EMAIL
-        msg['To'] = to_email
-
-        # Create email body
-        html_content = f"""
-        <html>
-        <body>
-            <h2>🔔 Price Alert Triggered</h2>
-            <p>Your price alert for <strong>{asset_name} ({symbol})</strong> has been triggered.</p>
-
-            <table border="1" cellpadding="10" cellspacing="0" style="border-collapse: collapse;">
-                <tr>
-                    <td><strong>Stock</strong></td>
-                    <td>{asset_name} ({symbol})</td>
-                </tr>
-                <tr>
-                    <td><strong>Current Price</strong></td>
-                    <td>${current_price:.2f}</td>
-                </tr>
-                <tr>
-                    <td><strong>Your Threshold</strong></td>
-                    <td>${threshold:.2f}</td>
-                </tr>
-                <tr>
-                    <td><strong>Status</strong></td>
-                    <td style="color: red;"><strong>⚠️ Price Below Threshold</strong></td>
-                </tr>
-                <tr>
-                    <td><strong>Time</strong></td>
-                    <td>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</td>
-                </tr>
-            </table>
-
-            <p><em>This is an automated message from OdinOracle Price Monitor.</em></p>
-        </body>
-        </html>
-        """
-
-        part = MIMEText(html_content, 'html')
-        msg.attach(part)
-
-        # Send email
-        logger.info(f"Sending email alert to {to_email}")
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.send_message(msg)
-
-        logger.info(f"Email alert sent successfully to {to_email}")
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to send email alert: {e}")
-        return False
-
-
 def check_price_alerts():
     """
     Main job function to check all assets for price alerts.
@@ -178,6 +35,9 @@ def check_price_alerts():
     logger.info("Starting price alert check...")
     logger.info("=" * 60)
 
+    # Initialize email service
+    email_service = EmailService()
+
     # Get user preferences for email
     prefs = get_user_preferences()
     if not prefs or not prefs.email_address:
@@ -185,6 +45,11 @@ def check_price_alerts():
         return
 
     user_email = prefs.email_address
+
+    # Check if email service is configured
+    if not email_service.is_configured():
+        logger.warning("Email service not configured. Please check SMTP settings.")
+        return
 
     # Get all assets
     assets = get_all_assets()
@@ -202,8 +67,8 @@ def check_price_alerts():
             logger.debug(f"No threshold set for {asset.symbol}, skipping...")
             continue
 
-        # Fetch current price
-        current_price = get_current_price(asset.symbol, asset.market_type)
+        # Fetch current price using MarketDataService
+        current_price = MarketDataService.get_current_price(asset.symbol, asset.market_type)
 
         if current_price is None:
             logger.warning(f"Could not fetch price for {asset.symbol}, skipping...")
@@ -218,8 +83,8 @@ def check_price_alerts():
                 f"(${asset.alert_price_threshold:.2f})"
             )
 
-            # Send email alert
-            success = send_email_alert(
+            # Send email alert using EmailService
+            success = email_service.send_price_alert(
                 to_email=user_email,
                 asset_name=asset.name,
                 symbol=asset.symbol,
@@ -234,7 +99,7 @@ def check_price_alerts():
                 f"{asset.symbol}: ${current_price:.2f} (threshold: ${asset.alert_price_threshold:.2f}) - OK"
             )
 
-        # Small delay between requests to be respectful to yfinance
+        # Small delay between requests to be respectful to API
         time.sleep(1)
 
     logger.info("=" * 60)
