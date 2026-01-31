@@ -294,6 +294,87 @@ class MarketDataService:
             return None
 
     @staticmethod
+    def get_previous_close(symbol: str, market_type: str) -> Optional[float]:
+        """
+        Fetch the previous day's closing price for daily PnL calculation.
+
+        Args:
+            symbol: Stock symbol
+            market_type: Market type (US, HK, CN)
+
+        Returns:
+            Previous close price as float, or None if unavailable
+        """
+        try:
+            yf_symbol = normalize_symbol(symbol, market_type)
+            ticker = yf.Ticker(yf_symbol)
+            info = ticker.info
+
+            # Try to get previous close from info
+            prev_close = info.get('previousClose')
+            if prev_close:
+                return float(prev_close)
+
+            # Fallback: fetch 2 days of history and get the second to last close
+            hist = ticker.history(period="2d")
+            if len(hist) >= 2:
+                return float(hist['Close'].iloc[-2])
+
+            logger.warning(f"Could not get previous close for {symbol}")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error fetching previous close for {symbol}: {e}")
+            return None
+
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def get_exchange_rate(from_currency: str, to_currency: str = "USD") -> Optional[float]:
+        """
+        Fetch real-time exchange rate using yfinance.
+
+        Args:
+            from_currency: Source currency code (e.g., "USD", "HKD", "CNY")
+            to_currency: Target currency code (default: "USD")
+
+        Returns:
+            Exchange rate as float, or 1.0 if same currency, or None if unavailable
+
+        Examples:
+            get_exchange_rate("HKD", "USD") -> 0.128
+            get_exchange_rate("CNY", "USD") -> 0.14
+            get_exchange_rate("USD", "CNY") -> 7.2
+        """
+        if from_currency == to_currency:
+            return 1.0
+
+        try:
+            # yfinance uses FX ticker format: FROMTO=X or FROM=X
+            # For example: USDCNY=X, USDHKD=X
+            ticker_symbol = f"{from_currency}{to_currency}=X"
+            ticker = yf.Ticker(ticker_symbol)
+
+            # Try to get the last price
+            hist = ticker.history(period="1d")
+            if not hist.empty:
+                rate = hist['Close'].iloc[-1]
+                if rate > 0:
+                    return float(rate)
+
+            # Fallback: try info
+            info = ticker.info
+            rate = info.get('previousClose') or info.get('regularMarketPrice') or info.get('lastPrice')
+            if rate:
+                return float(rate)
+
+            logger.warning(f"Could not get exchange rate for {ticker_symbol}")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error fetching exchange rate {from_currency}->{to_currency}: {e}")
+            return None
+
+    @staticmethod
     def clear_cache():
         """Clear the LRU cache."""
         MarketDataService.get_current_price.cache_clear()

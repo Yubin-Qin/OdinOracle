@@ -15,8 +15,10 @@ from database import (
     init_db, add_asset, get_all_assets, get_asset_by_id,
     update_asset_alert_threshold, add_transaction,
     get_transactions_by_asset, get_all_transactions,
-    save_user_email, save_user_language, get_user_preferences,
-    get_latest_metric, get_metrics_history
+    save_user_email, save_user_language, save_user_base_currency,
+    get_user_preferences, get_latest_metric, get_metrics_history,
+    get_transaction_by_id, update_transaction, delete_transaction,
+    delete_asset
 )
 from tools import get_stock_price, search_stock_news, get_stock_info
 from llm_engine import LLMClient, get_system_prompt
@@ -101,6 +103,18 @@ TEXT = {
         "hold": "Hold",
         "sell": "Sell",
         "strong_sell": "Strong Sell",
+        # New translations for Edit/Delete
+        "edit_delete_positions": "Edit/Delete Positions",
+        "date": "Date",
+        "type": "Type",
+        "price": "Price",
+        "actions": "Actions",
+        "edit": "Edit",
+        "delete": "Delete",
+        "edit_transaction": "Edit Transaction",
+        "delete_transaction": "Delete Transaction",
+        "delete_asset_confirm": "Are you sure you want to delete this asset and all its transactions?",
+        "base_currency": "Base Currency",
     },
     "zh": {
         "app_title": "OdinOracle",
@@ -138,6 +152,18 @@ TEXT = {
         "hold": "持有",
         "sell": "卖出",
         "strong_sell": "强烈卖出",
+        # New translations for Edit/Delete
+        "edit_delete_positions": "编辑/删除头寸",
+        "date": "日期",
+        "type": "类型",
+        "price": "价格",
+        "actions": "操作",
+        "edit": "编辑",
+        "delete": "删除",
+        "edit_transaction": "编辑交易",
+        "delete_transaction": "删除交易",
+        "delete_asset_confirm": "确定要删除此资产及其所有交易记录吗？",
+        "base_currency": "基础货币",
     }
 }
 
@@ -295,6 +321,25 @@ def render_sidebar():
     )
     st.session_state.language = lang_options[selected_lang]
 
+    # --- Base Currency Selection ---
+    st.sidebar.subheader("💱 " + T('base_currency'))
+    prefs = get_user_preferences()
+    current_base_currency = prefs.base_currency if prefs else "USD"
+
+    currency_options = ["USD ($)", "CNY (¥)", "HKD (HK$)"]
+    currency_map = {"USD ($)": "USD", "CNY (¥)": "CNY", "HKD (HK$)": "HKD"}
+    selected_currency = st.sidebar.selectbox(
+        "Select Base Currency",
+        options=currency_options,
+        index=list(currency_map.values()).index(current_base_currency) if current_base_currency in currency_map.values() else 0
+    )
+
+    new_currency = currency_map[selected_currency]
+    if new_currency != current_base_currency:
+        save_user_base_currency(new_currency)
+        st.sidebar.success(f"✅ Base currency updated to {new_currency}")
+        st.rerun()
+
     # --- LLM Settings ---
     st.sidebar.subheader("🤖 LLM Configuration")
 
@@ -377,25 +422,29 @@ def render_portfolio_summary():
     """Render portfolio overview with net worth, PnL table and metrics grid."""
     st.subheader(f"📊 {T('dashboard')}")
 
-    portfolio = PortfolioService.calculate_net_worth()
+    # Get user's base currency preference
+    prefs = get_user_preferences()
+    base_currency = prefs.base_currency if prefs else "USD"
+    currency_symbol = {"USD": "$", "CNY": "¥", "HKD": "HK$"}.get(base_currency, "$")
+
+    portfolio = PortfolioService.calculate_net_worth(base_currency)
 
     if portfolio['total_value'] == 0:
         st.info(T('no_holdings'))
         return
 
-    # Display metrics
+    # Display metrics with currency symbol
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric(T('total_net_worth'), f"${portfolio['total_value']:,.2f}")
+        st.metric(f"{T('total_net_worth')} ({base_currency})", f"{currency_symbol}{portfolio['total_value']:,.2f}")
     with col2:
         pnl_color = "🟢" if portfolio['daily_pnl'] >= 0 else "🔴"
-        st.metric(f"{pnl_color} {T('daily_pnl')}", f"${portfolio['daily_pnl']:,.2f}")
+        st.metric(f"{pnl_color} {T('daily_pnl')}", f"{currency_symbol}{portfolio['daily_pnl']:,.2f}")
     with col3:
         pnl_color = "🟢" if portfolio['total_pnl'] >= 0 else "🔴"
-        st.metric(f"{pnl_color} {T('total_pnl')}", f"${portfolio['total_pnl']:,.2f}")
+        st.metric(f"{pnl_color} {T('total_pnl')}", f"{currency_symbol}{portfolio['total_pnl']:,.2f}")
     with col4:
         pnl_pct_color = "🟢" if portfolio['total_pnl_pct'] >= 0 else "🔴"
-        prefs = get_user_preferences()
         email_status = T('configured') if prefs and prefs.email_address else T('not_set')
         st.metric(f"{'🟢' if prefs and prefs.email_address else '❌'} {T('email_alerts')}", email_status)
 
@@ -494,7 +543,7 @@ def render_add_asset_form():
 
 
 def render_manage_portfolio():
-    """Render portfolio management interface with auto-asset creation."""
+    """Render portfolio management interface with auto-asset creation and Edit/Delete functionality."""
     st.subheader(f"📁 {T('manage_portfolio')} - Add Position")
 
     with st.form("add_position_form"):
@@ -530,17 +579,108 @@ def render_manage_portfolio():
                         st.success(f"✅ Added {quantity} shares of {symbol} @ ${avg_cost:.2f}!")
                         st.rerun()
 
-    # Show recent positions
+    # Edit/Delete Positions Section
     st.markdown("---")
-    st.markdown("### Recent Positions Added")
-    transactions = get_all_transactions()[-10:]
-    if transactions:
-        for tx in reversed(transactions):
-            asset = get_asset_by_id(tx.asset_id)
-            if asset:
-                st.text(f"{tx.transaction_date} | {tx.transaction_type.upper()} | {asset.symbol} | {tx.quantity} shares @ ${tx.price:.2f}")
-    else:
-        st.info("No positions added yet.")
+    st.markdown(f"### {T('edit_delete_positions')}")
+
+    tabs = st.tabs([T('edit_delete_positions'), "Delete Assets"])
+
+    with tabs[0]:
+        # Show all transactions with Edit/Delete options
+        transactions = get_all_transactions()
+        if transactions:
+            # Sort by date descending
+            transactions_sorted = sorted(transactions, key=lambda x: x.transaction_date, reverse=True)
+
+            for tx in transactions_sorted:
+                asset = get_asset_by_id(tx.asset_id)
+                if asset:
+                    with st.expander(f"{tx.transaction_date} | {tx.transaction_type.upper()} | {asset.symbol} | {tx.quantity} shares @ ${tx.price:.2f}"):
+                        col1, col2, col3 = st.columns(3)
+
+                        with col1:
+                            # Edit Transaction
+                            if st.button(T('edit'), key=f"edit_{tx.id}"):
+                                st.session_state[f"editing_{tx.id}"] = True
+
+                            if st.session_state.get(f"editing_{tx.id}", False):
+                                with st.form(key=f"edit_form_{tx.id}"):
+                                    new_date = st.date_input(T('date'), value=tx.transaction_date, key=f"edit_date_{tx.id}")
+                                    new_type = st.selectbox(T('type'), ["buy", "sell"], index=0 if tx.transaction_type == "buy" else 1, key=f"edit_type_{tx.id}")
+                                    new_qty = st.number_input(T('quantity'), min_value=0.0, step=0.01, value=tx.quantity, key=f"edit_qty_{tx.id}")
+                                    new_price = st.number_input(T('price'), min_value=0.0, step=0.01, value=tx.price, key=f"edit_price_{tx.id}")
+
+                                    col_save, col_cancel = st.columns(2)
+                                    with col_save:
+                                        if st.form_submit_button("Save", use_container_width=True):
+                                            update_transaction(
+                                                tx.id,
+                                                transaction_date=new_date,
+                                                transaction_type=new_type,
+                                                quantity=new_qty,
+                                                price=new_price
+                                            )
+                                            st.success(f"✅ Transaction updated!")
+                                            st.session_state[f"editing_{tx.id}"] = False
+                                            st.rerun()
+                                    with col_cancel:
+                                        if st.form_submit_button("Cancel", use_container_width=True):
+                                            st.session_state[f"editing_{tx.id}"] = False
+                                            st.rerun()
+
+                        with col2:
+                            # Delete Transaction
+                            if st.button(T('delete'), key=f"delete_{tx.id}", type="secondary"):
+                                st.session_state[f"confirm_delete_{tx.id}"] = True
+
+                            if st.session_state.get(f"confirm_delete_{tx.id}", False):
+                                st.warning(f"⚠️ {T('delete_transaction')}: {asset.symbol} - {tx.quantity} shares @ ${tx.price:.2f}?")
+                                col_yes, col_no = st.columns(2)
+                                with col_yes:
+                                    if st.button("Yes, Delete", key=f"confirm_yes_{tx.id}", type="primary"):
+                                        delete_transaction(tx.id)
+                                        st.success("✅ Transaction deleted!")
+                                        st.session_state[f"confirm_delete_{tx.id}"] = False
+                                        st.rerun()
+                                with col_no:
+                                    if st.button("Cancel", key=f"confirm_no_{tx.id}"):
+                                        st.session_state[f"confirm_delete_{tx.id}"] = False
+                                        st.rerun()
+
+                        with col3:
+                            st.caption(f"Asset: {asset.name}")
+                            st.caption(f"Market: {asset.market_type}")
+
+        else:
+            st.info("No transactions found.")
+
+    with tabs[1]:
+        # Delete Assets section
+        assets = get_all_assets()
+        if assets:
+            st.info("⚠️ Deleting an asset will permanently remove all its transaction records.")
+            for asset in assets:
+                transactions_count = len(get_transactions_by_asset(asset.id))
+                with st.expander(f"{asset.symbol} | {asset.name} | {asset.market_type} | {transactions_count} transactions"):
+                    if st.button(f"Delete Asset: {asset.symbol}", key=f"del_asset_{asset.id}", type="secondary"):
+                        st.session_state[f"confirm_delete_asset_{asset.id}"] = True
+
+                    if st.session_state.get(f"confirm_delete_asset_{asset.id}", False):
+                        st.warning(f"⚠️ {T('delete_asset_confirm')}")
+                        st.caption(f"This will delete {asset.symbol} and all {transactions_count} associated transactions.")
+                        col_yes, col_no = st.columns(2)
+                        with col_yes:
+                            if st.button("Yes, Delete Asset", key=f"confirm_yes_asset_{asset.id}", type="primary"):
+                                if delete_asset(asset.id):
+                                    st.success(f"✅ Asset {asset.symbol} deleted!")
+                                    st.session_state[f"confirm_delete_asset_{asset.id}"] = False
+                                    st.rerun()
+                        with col_no:
+                            if st.button("Cancel", key=f"confirm_no_asset_{asset.id}"):
+                                st.session_state[f"confirm_delete_asset_{asset.id}"] = False
+                                st.rerun()
+        else:
+            st.info("No assets found.")
 
 
 def render_market_intel():

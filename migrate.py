@@ -40,6 +40,37 @@ def migrate_userpreferences_add_language():
         conn.close()
 
 
+def migrate_userpreferences_add_base_currency():
+    """Add base_currency column to userpreferences table if it doesn't exist."""
+    if not os.path.exists(DB_FILE):
+        print(f"Database {DB_FILE} does not exist. Nothing to migrate.")
+        return
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    try:
+        # Check if the column already exists
+        cursor.execute("PRAGMA table_info(userpreferences)")
+        columns = [col[1] for col in cursor.fetchall()]
+
+        if 'base_currency' not in columns:
+            print("Adding 'base_currency' column to userpreferences table...")
+            cursor.execute(
+                "ALTER TABLE userpreferences ADD COLUMN base_currency TEXT DEFAULT 'USD'"
+            )
+            conn.commit()
+            print("✓ Added 'base_currency' column successfully.")
+        else:
+            print("✓ Column 'base_currency' already exists in userpreferences table.")
+
+    except sqlite3.OperationalError as e:
+        print(f"Error during migration: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+
 def migrate_assetdailymetric_table():
     """
     Create the assetdailymetric table if it doesn't exist.
@@ -105,6 +136,7 @@ def run_all_migrations():
     print("=" * 60)
 
     migrate_userpreferences_add_language()
+    migrate_userpreferences_add_base_currency()
     migrate_assetdailymetric_table()
 
     print("=" * 60)

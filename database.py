@@ -41,6 +41,7 @@ class UserPreferences(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     email_address: Optional[str] = Field(default=None)
     language: Optional[str] = Field(default="en")  # "en" or "zh"
+    base_currency: Optional[str] = Field(default="USD")  # "USD", "CNY", "HKD", etc.
 
 
 class AssetDailyMetric(SQLModel, table=True):
@@ -145,6 +146,31 @@ def update_asset_alert_threshold(asset_id: int, alert_threshold: Optional[float]
         return None
 
 
+def delete_asset(asset_id: int) -> bool:
+    """
+    Delete an asset and all its transactions.
+    Returns True if successful, False otherwise.
+    """
+    with get_session() as session:
+        try:
+            # First, delete all transactions for this asset
+            statement = select(Transaction).where(Transaction.asset_id == asset_id)
+            transactions = session.exec(statement).all()
+            for tx in transactions:
+                session.delete(tx)
+
+            # Then delete the asset
+            asset = session.get(Asset, asset_id)
+            if asset:
+                session.delete(asset)
+                session.commit()
+                return True
+            return False
+        except Exception as e:
+            session.rollback()
+            raise e
+
+
 # ==================== Transaction Operations ====================
 def add_transaction(asset_id: int, transaction_date: date, transaction_type: str,
                    quantity: float, price: float) -> Transaction:
@@ -177,6 +203,56 @@ def get_all_transactions() -> list[Transaction]:
         statement = select(Transaction)
         results = session.exec(statement)
         return list(results.all())
+
+
+def get_transaction_by_id(transaction_id: int) -> Optional[Transaction]:
+    """Retrieve a transaction by its ID."""
+    with get_session() as session:
+        return session.get(Transaction, transaction_id)
+
+
+def update_transaction(transaction_id: int, transaction_date: Optional[date] = None,
+                       transaction_type: Optional[str] = None,
+                       quantity: Optional[float] = None,
+                       price: Optional[float] = None) -> Optional[Transaction]:
+    """
+    Update an existing transaction.
+    Only updates fields that are provided (not None).
+    """
+    with get_session() as session:
+        transaction = session.get(Transaction, transaction_id)
+        if transaction:
+            if transaction_date is not None:
+                transaction.transaction_date = transaction_date
+            if transaction_type is not None:
+                transaction.transaction_type = transaction_type
+            if quantity is not None:
+                transaction.quantity = quantity
+            if price is not None:
+                transaction.price = price
+            session.add(transaction)
+            session.commit()
+            session.refresh(transaction)
+            return transaction
+        return None
+
+
+def delete_transaction(transaction_id: int) -> bool:
+    """
+    Delete a transaction by its ID.
+    Returns True if successful, False otherwise.
+    """
+    with get_session() as session:
+        try:
+            transaction = session.get(Transaction, transaction_id)
+            if transaction:
+                session.delete(transaction)
+                session.commit()
+                return True
+            return False
+        except Exception as e:
+            session.rollback()
+            raise e
 
 
 # ==================== AssetDailyMetric Operations ====================
@@ -298,6 +374,27 @@ def save_user_language(language: str) -> UserPreferences:
             return prefs
         else:
             prefs = UserPreferences(language=language)
+            session.add(prefs)
+            session.commit()
+            session.refresh(prefs)
+            return prefs
+
+
+def save_user_base_currency(base_currency: str) -> UserPreferences:
+    """Save or update user base currency preference."""
+    with get_session() as session:
+        statement = select(UserPreferences)
+        results = session.exec(statement)
+        prefs = results.first()
+
+        if prefs:
+            prefs.base_currency = base_currency
+            session.add(prefs)
+            session.commit()
+            session.refresh(prefs)
+            return prefs
+        else:
+            prefs = UserPreferences(base_currency=base_currency)
             session.add(prefs)
             session.commit()
             session.refresh(prefs)
