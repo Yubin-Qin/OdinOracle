@@ -63,22 +63,18 @@ class EmailService:
             return False
 
         try:
-            # Create message
             msg = MIMEMultipart('alternative')
             msg['Subject'] = subject
             msg['From'] = self.from_email
             msg['To'] = to_email
 
-            # Add HTML content
             html_part = MIMEText(html_content, 'html')
             msg.attach(html_part)
 
-            # Add plain text if provided
             if plain_text:
                 text_part = MIMEText(plain_text, 'plain')
                 msg.attach(text_part)
 
-            # Send email
             logger.info(f"Sending email to {to_email}")
             with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
                 server.starttls()
@@ -100,19 +96,7 @@ class EmailService:
         current_price: float,
         threshold: float
     ) -> bool:
-        """
-        Send a price alert email.
-
-        Args:
-            to_email: Recipient email address
-            asset_name: Name of the asset
-            symbol: Stock symbol
-            current_price: Current stock price
-            threshold: Alert threshold price
-
-        Returns:
-            True if email sent successfully, False otherwise
-        """
+        """Send a price alert email."""
         from datetime import datetime
 
         html_content = f"""
@@ -120,69 +104,75 @@ class EmailService:
         <body>
             <h2>🔔 Price Alert Triggered</h2>
             <p>Your price alert for <strong>{asset_name} ({symbol})</strong> has been triggered.</p>
-
             <table border="1" cellpadding="10" cellspacing="0" style="border-collapse: collapse;">
-                <tr>
-                    <td><strong>Stock</strong></td>
-                    <td>{asset_name} ({symbol})</td>
-                </tr>
-                <tr>
-                    <td><strong>Current Price</strong></td>
-                    <td>${current_price:.2f}</td>
-                </tr>
-                <tr>
-                    <td><strong>Your Threshold</strong></td>
-                    <td>${threshold:.2f}</td>
-                </tr>
-                <tr>
-                    <td><strong>Status</strong></td>
-                    <td style="color: red;"><strong>⚠️ Price Below Threshold</strong></td>
-                </tr>
-                <tr>
-                    <td><strong>Time</strong></td>
-                    <td>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</td>
-                </tr>
+                <tr><td><strong>Stock</strong></td><td>{asset_name} ({symbol})</td></tr>
+                <tr><td><strong>Current Price</strong></td><td>${current_price:.2f}</td></tr>
+                <tr><td><strong>Your Threshold</strong></td><td>${threshold:.2f}</td></tr>
+                <tr><td><strong>Status</strong></td><td style="color: red;"><strong>⚠️ Price Below Threshold</strong></td></tr>
+                <tr><td><strong>Time</strong></td><td>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</td></tr>
             </table>
-
             <p><em>This is an automated message from OdinOracle Price Monitor.</em></p>
         </body>
         </html>
         """
 
         subject = f"🚨 Price Alert: {asset_name} ({symbol}) - ${current_price:.2f}"
-
         return self.send_email(to_email, subject, html_content)
 
     def send_market_report(self, to_email: str, report: str, report_date: str) -> bool:
-        """
-        Send a market intelligence report email.
-
-        Args:
-            to_email: Recipient email address
-            report: Report content
-            report_date: Date of the report
-
-        Returns:
-            True if email sent successfully, False otherwise
-        """
+        """Send a market intelligence report email."""
         html_content = f"""
         <html>
         <body>
             <h2>📈 OdinOracle Daily Market Briefing</h2>
             <p><strong>Date:</strong> {report_date}</p>
-
             <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin-top: 20px;">
                 <h3>Report Summary:</h3>
                 <pre style="white-space: pre-wrap; font-family: Arial, sans-serif; font-size: 14px; line-height: 1.6;">{report}</pre>
             </div>
-
-            <p style="margin-top: 30px; color: gray; font-size: 12px;">
-                <em>This is an automated message from OdinOracle Market Intelligence.</em>
-            </p>
+            <p style="margin-top: 30px; color: gray; font-size: 12px;"><em>This is an automated message from OdinOracle Market Intelligence.</em></p>
         </body>
         </html>
         """
 
         subject = f"📊 OdinOracle Daily Market Briefing - {report_date}"
+        return self.send_email(to_email, subject, html_content)
 
+    def send_signal_alert(
+        self,
+        to_email: str,
+        symbol: str,
+        signal: str,
+        confidence: int,
+        price: float,
+        reasons: list
+    ) -> bool:
+        """Send a trading signal alert email."""
+        signal_emoji = {
+            'STRONG_BUY': '🟢🟢',
+            'BUY': '🟢',
+            'HOLD': '🟡',
+            'SELL': '🔴',
+            'STRONG_SELL': '🔴🔴'
+        }.get(signal, '📊')
+
+        html_content = f"""
+        <html>
+        <body>
+            <h2>{signal_emoji} Trading Signal Alert</h2>
+            <table border="1" cellpadding="10" cellspacing="0" style="border-collapse: collapse;">
+                <tr><td><strong>Symbol</strong></td><td>{symbol}</td></tr>
+                <tr><td><strong>Signal</strong></td><td><strong>{signal}</strong> (Confidence: {confidence}/10)</td></tr>
+                <tr><td><strong>Current Price</strong></td><td>${price:.2f}</td></tr>
+            </table>
+            <h3>Analysis:</h3>
+            <ul>
+                {"".join(f"<li>{r}</li>" for r in reasons)}
+            </ul>
+            <p><em>This is an automated signal from OdinOracle Quant Engine.</em></p>
+        </body>
+        </html>
+        """
+
+        subject = f"📊 Signal Alert: {symbol} - {signal}"
         return self.send_email(to_email, subject, html_content)

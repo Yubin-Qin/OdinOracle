@@ -1,11 +1,12 @@
 """
 Database models and initialization for OdinOracle.
 Uses SQLModel with SQLite for persistent storage.
+Enhanced with AssetDailyMetric for technical indicators history.
 """
 
 from sqlmodel import SQLModel, Field, Session, create_engine, select
 from typing import Optional
-from datetime import date
+from datetime import date, datetime
 import os
 
 # Database file path
@@ -39,6 +40,48 @@ class UserPreferences(SQLModel, table=True):
     """Stores user preferences and settings."""
     id: Optional[int] = Field(default=None, primary_key=True)
     email_address: Optional[str] = Field(default=None)
+    language: Optional[str] = Field(default="en")  # "en" or "zh"
+
+
+class AssetDailyMetric(SQLModel, table=True):
+    """
+    Daily technical metrics for an asset.
+    Stores calculated indicators for historical analysis and backtesting.
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    asset_id: int = Field(foreign_key="asset.id", index=True)
+    metric_date: date = Field(index=True)
+
+    # Price data
+    close_price: float
+
+    # Trend indicators
+    sma_20: Optional[float] = Field(default=None)
+    sma_50: Optional[float] = Field(default=None)
+    sma_200: Optional[float] = Field(default=None)
+
+    # Momentum indicators
+    rsi_14: Optional[float] = Field(default=None)
+    macd: Optional[float] = Field(default=None)
+    macd_signal: Optional[float] = Field(default=None)
+    macd_histogram: Optional[float] = Field(default=None)
+
+    # Volatility indicators
+    bollinger_upper: Optional[float] = Field(default=None)
+    bollinger_middle: Optional[float] = Field(default=None)
+    bollinger_lower: Optional[float] = Field(default=None)
+    bollinger_bandwidth: Optional[float] = Field(default=None)  # (upper - lower) / middle
+
+    # Volume indicators
+    volume: Optional[int] = Field(default=None)
+    volume_sma_20: Optional[float] = Field(default=None)
+    volume_ratio: Optional[float] = Field(default=None)  # volume / volume_sma_20
+
+    # Signal (calculated from all factors)
+    overall_signal: Optional[str] = Field(default=None)  # "STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"
+    confidence_score: Optional[int] = Field(default=None)  # 0-10
+
+    created_at: datetime = Field(default_factory=datetime.now)
 
 
 def init_db():
@@ -51,6 +94,7 @@ def get_session():
     return Session(engine)
 
 
+# ==================== Asset Operations ====================
 def add_asset(symbol: str, name: str, market_type: str, alert_price_threshold: Optional[float] = None) -> Asset:
     """Add a new asset to the database."""
     with get_session() as session:
@@ -80,6 +124,14 @@ def get_asset_by_id(asset_id: int) -> Optional[Asset]:
         return session.get(Asset, asset_id)
 
 
+def get_asset_by_symbol(symbol: str) -> Optional[Asset]:
+    """Retrieve an asset by symbol (case-insensitive)."""
+    with get_session() as session:
+        statement = select(Asset).where(Asset.symbol.ilike(symbol))
+        results = session.exec(statement)
+        return results.first()
+
+
 def update_asset_alert_threshold(asset_id: int, alert_threshold: Optional[float]) -> Optional[Asset]:
     """Update the alert price threshold for an asset."""
     with get_session() as session:
@@ -93,6 +145,7 @@ def update_asset_alert_threshold(asset_id: int, alert_threshold: Optional[float]
         return None
 
 
+# ==================== Transaction Operations ====================
 def add_transaction(asset_id: int, transaction_date: date, transaction_type: str,
                    quantity: float, price: float) -> Transaction:
     """Add a new transaction to the database."""
@@ -126,10 +179,84 @@ def get_all_transactions() -> list[Transaction]:
         return list(results.all())
 
 
+# ==================== AssetDailyMetric Operations ====================
+def save_daily_metric(metric: AssetDailyMetric) -> AssetDailyMetric:
+    """
+    Save or update a daily metric record.
+    Uses upsert logic: if exists for asset_id + date, update; otherwise insert.
+    """
+    with get_session() as session:
+        # Check if metric already exists
+        statement = select(AssetDailyMetric).where(
+            AssetDailyMetric.asset_id == metric.asset_id,
+            AssetDailyMetric.metric_date == metric.metric_date
+        )
+        existing = session.exec(statement).first()
+
+        if existing:
+            # Update existing record
+            existing.close_price = metric.close_price
+            existing.sma_20 = metric.sma_20
+            existing.sma_50 = metric.sma_50
+            existing.sma_200 = metric.sma_200
+            existing.rsi_14 = metric.rsi_14
+            existing.macd = metric.macd
+            existing.macd_signal = metric.macd_signal
+            existing.macd_histogram = metric.macd_histogram
+            existing.bollinger_upper = metric.bollinger_upper
+            existing.bollinger_middle = metric.bollinger_middle
+            existing.bollinger_lower = metric.bollinger_lower
+            existing.bollinger_bandwidth = metric.bollinger_bandwidth
+            existing.volume = metric.volume
+            existing.volume_sma_20 = metric.volume_sma_20
+            existing.volume_ratio = metric.volume_ratio
+            existing.overall_signal = metric.overall_signal
+            existing.confidence_score = metric.confidence_score
+            session.add(existing)
+            session.commit()
+            session.refresh(existing)
+            return existing
+        else:
+            # Insert new record
+            session.add(metric)
+            session.commit()
+            session.refresh(metric)
+            return metric
+
+
+def get_latest_metric(asset_id: int) -> Optional[AssetDailyMetric]:
+    """Get the most recent daily metric for an asset."""
+    with get_session() as session:
+        statement = select(AssetDailyMetric).where(
+            AssetDailyMetric.asset_id == asset_id
+        ).order_by(AssetDailyMetric.metric_date.desc()).limit(1)
+        return session.exec(statement).first()
+
+
+def get_metrics_history(asset_id: int, days: int = 60) -> list[AssetDailyMetric]:
+    """Get historical metrics for an asset."""
+    with get_session() as session:
+        statement = select(AssetDailyMetric).where(
+            AssetDailyMetric.asset_id == asset_id
+        ).order_by(AssetDailyMetric.metric_date.desc()).limit(days)
+        results = session.exec(statement)
+        return list(results.all())
+
+
+def get_metric_by_date(asset_id: int, metric_date: date) -> Optional[AssetDailyMetric]:
+    """Get a specific metric by date."""
+    with get_session() as session:
+        statement = select(AssetDailyMetric).where(
+            AssetDailyMetric.asset_id == asset_id,
+            AssetDailyMetric.metric_date == metric_date
+        )
+        return session.exec(statement).first()
+
+
+# ==================== UserPreferences Operations ====================
 def save_user_email(email: str) -> UserPreferences:
     """Save or update user email preferences."""
     with get_session() as session:
-        # Check if preferences already exist
         statement = select(UserPreferences)
         results = session.exec(statement)
         prefs = results.first()
@@ -154,6 +281,27 @@ def get_user_preferences() -> Optional[UserPreferences]:
         statement = select(UserPreferences)
         results = session.exec(statement)
         return results.first()
+
+
+def save_user_language(language: str) -> UserPreferences:
+    """Save or update user language preference."""
+    with get_session() as session:
+        statement = select(UserPreferences)
+        results = session.exec(statement)
+        prefs = results.first()
+
+        if prefs:
+            prefs.language = language
+            session.add(prefs)
+            session.commit()
+            session.refresh(prefs)
+            return prefs
+        else:
+            prefs = UserPreferences(language=language)
+            session.add(prefs)
+            session.commit()
+            session.refresh(prefs)
+            return prefs
 
 
 if __name__ == "__main__":
