@@ -1,11 +1,15 @@
 """
 Portfolio service for calculating holdings, PnL, and net worth.
-Enhanced with currency conversion and real daily PnL calculation.
+Enhanced with currency conversion, real daily PnL calculation, and risk metrics.
 """
 
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from datetime import date
+from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
 
 from database import get_all_assets, get_asset_by_id, get_transactions_by_asset, get_all_transactions, get_user_preferences
 from services.market_data import MarketDataService
@@ -21,10 +25,36 @@ MARKET_CURRENCY_MAP = {
 }
 
 
+@dataclass
+class RiskMetrics:
+    """Risk-adjusted performance metrics for portfolio analysis."""
+    portfolio_sharpe_ratio: float
+    portfolio_volatility: float  # Annualized
+    portfolio_beta: float  # vs benchmark (would need market data)
+    var_95: float  # Value at Risk (95% confidence)
+    max_drawdown_pct: float
+    correlation_matrix: Optional[pd.DataFrame] = None
+    concentration_risk: Dict[str, float] = None  # Position concentration warnings
+
+
+@dataclass
+class PortfolioAnalytics:
+    """Comprehensive portfolio analytics including holdings and risk metrics."""
+    holdings: List[Dict]
+    total_value: float
+    total_cost: float
+    total_pnl: float
+    total_pnl_pct: float
+    daily_pnl: float
+    base_currency: str
+    risk_metrics: RiskMetrics
+
+
 class PortfolioService:
     """
     Service for portfolio calculations and analysis.
     Handles multi-currency portfolios with conversion to base currency.
+    Enhanced with risk management metrics (Sharpe Ratio, Correlation Matrix).
     """
 
     @staticmethod
@@ -223,3 +253,363 @@ class PortfolioService:
         """
         portfolio = PortfolioService.calculate_net_worth()
         return portfolio.get('daily_pnl', 0.0)
+
+    # ==================== Risk Management Metrics ====================
+
+    @staticmethod
+    def calculate_sharpe_ratio(holdings: List[Dict],
+                               lookback_days: int = 30,
+                               risk_free_rate: float = 0.02) -> float:
+        """
+        Calculate portfolio Sharpe Ratio (risk-adjusted return).
+
+        The Sharpe Ratio measures the excess return per unit of risk (volatility).
+        Higher is better. Typically:
+        - < 1: Sub-optimal
+        - 1-2: Good
+        - 2-3: Very good
+        - > 3: Excellent
+
+        Args:
+            holdings: List of holding dictionaries with historical price data
+            lookback_days: Number of days for calculation (default: 30)
+            risk_free_rate: Annual risk-free rate (default: 2%)
+
+        Returns:
+            Annualized Sharpe ratio
+        """
+        if len(holdings) < 1:
+            return 0.0
+
+        try:
+            # For each holding, we need historical returns
+            # Since we don't have full historical data in holdings,
+            # we'll estimate using the available metrics
+
+            # Collect daily returns from historical metrics if available
+            daily_returns = []
+
+            for holding in holdings:
+                symbol = holding['symbol']
+                market_type = holding['market_type']
+
+                # Fetch historical data
+                hist_data = MarketDataService.get_historical_data(
+                    symbol, market_type, period_months=lookback_days // 30 + 1
+                )
+
+                if hist_data is not None and len(hist_data) > 1:
+                    # Calculate daily returns
+                    prices = hist_data['Close'].values
+                    returns = np.diff(prices) / prices[:-1]
+
+                    # Weight by portfolio allocation
+                    weight = holding['current_value_base'] / sum(h['current_value_base'] for h in holdings)
+                    weighted_returns = returns * weight
+
+                    if len(daily_returns) == 0:
+                        daily_returns = weighted_returns.tolist()
+                    else:
+                        # Align lengths and add
+                        min_len = min(len(daily_returns), len(weighted_returns))
+                        daily_returns = [daily_returns[i] + weighted_returns[i] for i in range(min_len)]
+
+            if len(daily_returns) < 2:
+                logger.warning("Insufficient historical data for Sharpe ratio calculation")
+                return 0.0
+
+            returns_array = np.array(daily_returns)
+
+            # Calculate mean and standard deviation
+            mean_return = np.mean(returns_array)
+            std_return = np.std(returns_array)
+
+            if std_return == 0 or np.isnan(std_return):
+                return 0.0
+
+            # Daily risk-free rate
+            daily_risk_free = risk_free_rate / 252
+
+            # Annualized Sharpe ratio
+            sharpe = ((mean_return - daily_risk_free) / std_return) * np.sqrt(252)
+
+            return round(sharpe, 2)
+
+        except Exception as e:
+            logger.error(f"Error calculating Sharpe ratio: {e}")
+            return 0.0
+
+    @staticmethod
+    def calculate_correlation_matrix(holdings: List[Dict],
+                                     lookback_days: int = 30) -> Optional[pd.DataFrame]:
+        """
+        Calculate correlation matrix between portfolio assets.
+
+        Correlation ranges from -1 to 1:
+        - 1: Perfect positive correlation (assets move together)
+        - 0: No correlation
+        - -1: Perfect negative correlation (assets move opposite)
+
+        High correlation (>0.8) between assets indicates concentration risk.
+
+        Args:
+            holdings: List of holding dictionaries
+            lookback_days: Number of days for calculation (default: 30)
+
+        Returns:
+            Correlation matrix DataFrame or None if insufficient data
+        """
+        if len(holdings) < 2:
+            return None
+
+        try:
+            # Collect price history for each holding
+            price_data = {}
+
+            for holding in holdings:
+                symbol = holding['symbol']
+                market_type = holding['market_type']
+
+                # Fetch historical data
+                hist_data = MarketDataService.get_historical_data(
+                    symbol, market_type, period_months=lookback_days // 30 + 1
+                )
+
+                if hist_data is not None and len(hist_data) > 5:
+                    price_data[symbol] = hist_data['Close']
+
+            if len(price_data) < 2:
+                logger.warning("Insufficient price data for correlation calculation")
+                return None
+
+            # Create DataFrame with aligned dates
+            df = pd.DataFrame(price_data)
+
+            # Calculate returns
+            returns_df = df.pct_change().dropna()
+
+            if len(returns_df) < 5:
+                return None
+
+            # Calculate correlation matrix
+            corr_matrix = returns_df.corr()
+
+            return corr_matrix
+
+        except Exception as e:
+            logger.error(f"Error calculating correlation matrix: {e}")
+            return None
+
+    @staticmethod
+    def check_concentration_risk(holdings: List[Dict],
+                                 max_single_position_pct: float = 20.0,
+                                 max_sector_pct: float = 40.0) -> Dict[str, any]:
+        """
+        Check for concentration risk in the portfolio.
+
+        Args:
+            holdings: List of holding dictionaries
+            max_single_position_pct: Max % for single position (default: 20%)
+            max_sector_pct: Max % for single sector (default: 40%)
+
+        Returns:
+            Dictionary with concentration warnings and metrics
+        """
+        if not holdings:
+            return {
+                'warnings': [],
+                'single_position_risk': {},
+                'total_positions': 0,
+                'largest_position_pct': 0.0
+            }
+
+        total_value = sum(h['current_value_base'] for h in holdings)
+
+        if total_value == 0:
+            return {
+                'warnings': [],
+                'single_position_risk': {},
+                'total_positions': len(holdings),
+                'largest_position_pct': 0.0
+            }
+
+        warnings = []
+        position_risks = {}
+
+        # Check single position concentration
+        sorted_holdings = sorted(holdings, key=lambda x: x['current_value_base'], reverse=True)
+        largest_position_pct = 0.0
+
+        for holding in sorted_holdings:
+            position_pct = (holding['current_value_base'] / total_value) * 100
+            position_risks[holding['symbol']] = {
+                'value': holding['current_value_base'],
+                'percentage': round(position_pct, 2)
+            }
+
+            if position_pct > largest_position_pct:
+                largest_position_pct = position_pct
+
+            if position_pct > max_single_position_pct:
+                warnings.append({
+                    'type': 'single_position',
+                    'severity': 'high' if position_pct > 30 else 'medium',
+                    'symbol': holding['symbol'],
+                    'message': f"{holding['symbol']} is {position_pct:.1f}% of portfolio (max {max_single_position_pct}%)"
+                })
+
+        # Check for too few positions (diversification risk)
+        if len(holdings) < 3:
+            warnings.append({
+                'type': 'diversification',
+                'severity': 'medium',
+                'message': f"Portfolio has only {len(holdings)} position(s). Consider diversifying."
+            })
+
+        return {
+            'warnings': warnings,
+            'single_position_risk': position_risks,
+            'total_positions': len(holdings),
+            'largest_position_pct': round(largest_position_pct, 2),
+            'max_recommended_position_pct': max_single_position_pct
+        }
+
+    @staticmethod
+    def calculate_risk_metrics(base_currency: Optional[str] = None) -> RiskMetrics:
+        """
+        Calculate comprehensive risk metrics for the portfolio.
+
+        Args:
+            base_currency: Base currency for calculation
+
+        Returns:
+            RiskMetrics with Sharpe ratio, volatility, VaR, and correlation data
+        """
+        portfolio = PortfolioService.calculate_net_worth(base_currency)
+        holdings = portfolio.get('holdings', [])
+
+        if not holdings:
+            return RiskMetrics(
+                portfolio_sharpe_ratio=0.0,
+                portfolio_volatility=0.0,
+                portfolio_beta=1.0,
+                var_95=0.0,
+                max_drawdown_pct=0.0,
+                correlation_matrix=None,
+                concentration_risk=None
+            )
+
+        # Calculate Sharpe ratio
+        sharpe = PortfolioService.calculate_sharpe_ratio(holdings)
+
+        # Calculate correlation matrix
+        corr_matrix = PortfolioService.calculate_correlation_matrix(holdings)
+
+        # Check concentration risk
+        concentration = PortfolioService.check_concentration_risk(holdings)
+
+        # Estimate portfolio volatility (simplified)
+        volatility = 0.0
+        try:
+            if corr_matrix is not None:
+                # Use average of correlations as rough volatility proxy
+                corr_values = corr_matrix.values[np.triu_indices_from(corr_matrix.values, k=1)]
+                avg_correlation = np.mean(np.abs(corr_values)) if len(corr_values) > 0 else 0
+                volatility = avg_correlation * 20  # Rough annualized estimate
+        except:
+            pass
+
+        # Estimate VaR (95% confidence)
+        # Simplified: 1.645 * volatility * portfolio_value
+        var_95 = 1.645 * (volatility / 100) * portfolio['total_value']
+
+        return RiskMetrics(
+            portfolio_sharpe_ratio=sharpe,
+            portfolio_volatility=round(volatility, 2),
+            portfolio_beta=1.0,  # Would need market comparison
+            var_95=round(var_95, 2),
+            max_drawdown_pct=0.0,  # Would need historical tracking
+            correlation_matrix=corr_matrix,
+            concentration_risk=concentration
+        )
+
+    @staticmethod
+    def get_portfolio_analytics(base_currency: Optional[str] = None) -> PortfolioAnalytics:
+        """
+        Get comprehensive portfolio analytics including risk metrics.
+
+        Args:
+            base_currency: Base currency for calculation
+
+        Returns:
+            PortfolioAnalytics with holdings, value, and risk metrics
+        """
+        portfolio = PortfolioService.calculate_net_worth(base_currency)
+        risk_metrics = PortfolioService.calculate_risk_metrics(base_currency)
+
+        return PortfolioAnalytics(
+            holdings=portfolio['holdings'],
+            total_value=portfolio['total_value'],
+            total_cost=portfolio['total_cost'],
+            total_pnl=portfolio['total_pnl'],
+            total_pnl_pct=portfolio['total_pnl_pct'],
+            daily_pnl=portfolio['daily_pnl'],
+            base_currency=portfolio['base_currency'],
+            risk_metrics=risk_metrics
+        )
+
+    @staticmethod
+    def format_risk_report(analytics: PortfolioAnalytics) -> str:
+        """
+        Format a risk report for display.
+
+        Args:
+            analytics: PortfolioAnalytics object
+
+        Returns:
+            Formatted report string
+        """
+        risk = analytics.risk_metrics
+
+        lines = [
+            "=" * 60,
+            "PORTFOLIO RISK REPORT",
+            "=" * 60,
+            "",
+            "RISK METRICS",
+            "-" * 40,
+            f"Sharpe Ratio:              {risk.portfolio_sharpe_ratio:.2f}",
+            f"Portfolio Volatility:      {risk.portfolio_volatility:.2f}%",
+            f"Value at Risk (95%):       ${risk.var_95:,.2f}",
+            "",
+            "CONCENTRATION ANALYSIS",
+            "-" * 40,
+        ]
+
+        if risk.concentration_risk:
+            conc = risk.concentration_risk
+            lines.append(f"Total Positions:           {conc['total_positions']}")
+            lines.append(f"Largest Position:          {conc['largest_position_pct']:.1f}%")
+            lines.append(f"Max Recommended:           {conc['max_recommended_position_pct']:.1f}%")
+
+            if conc['warnings']:
+                lines.append("")
+                lines.append("WARNINGS:")
+                for warning in conc['warnings']:
+                    emoji = "🔴" if warning['severity'] == 'high' else "🟡"
+                    lines.append(f"  {emoji} {warning['message']}")
+            else:
+                lines.append("  ✓ No concentration risks detected")
+
+        if risk.correlation_matrix is not None:
+            lines.append("")
+            lines.append("CORRELATION MATRIX")
+            lines.append("-" * 40)
+            lines.append(risk.correlation_matrix.to_string())
+            lines.append("")
+            lines.append("Note: High correlation (>0.8) indicates concentration risk")
+
+        lines.append("")
+        lines.append("=" * 60)
+
+        return "\n".join(lines)

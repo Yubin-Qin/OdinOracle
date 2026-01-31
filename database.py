@@ -1,407 +1,175 @@
 """
-Database models and initialization for OdinOracle.
-Uses SQLModel with SQLite for persistent storage.
-Enhanced with AssetDailyMetric for technical indicators history.
+Database initialization and backward-compatible CRUD operations for OdinOracle.
+
+This module re-exports the engine functions from db_engine and provides
+backward-compatible CRUD functions that delegate to the repository layer.
+
+New code should use:
+- db_engine.get_engine() / db_engine.get_session() for engine/session access
+- repositories.* for data access
 """
 
-from sqlmodel import SQLModel, Field, Session, create_engine, select
-from typing import Optional
-from datetime import date, datetime
-import os
+from typing import Optional, List
+from datetime import date
 
-# Database file path
-DB_FILE = "odin_oracle.db"
-DATABASE_URL = f"sqlite:///{DB_FILE}"
+# Re-export engine functions from db_engine (avoids circular imports)
+from db_engine import get_engine, get_session, init_db
 
-# Create engine
-engine = create_engine(DATABASE_URL, echo=False)
+# Re-export all models for convenience
+from models import Asset, Transaction, UserPreferences, AssetDailyMetric
 
+# Import repositories for backward-compatible function delegation
+from repositories import (
+    AssetRepository,
+    TransactionRepository,
+    MetricRepository,
+    UserPreferencesRepository
+)
 
-class Asset(SQLModel, table=True):
-    """Represents a stock/asset in the portfolio."""
-    id: Optional[int] = Field(default=None, primary_key=True)
-    symbol: str = Field(index=True)  # e.g., "NVDA", "0700.HK", "600519.SS"
-    name: str = Field(index=True)  # e.g., "NVIDIA Corporation", "Tencent"
-    market_type: str  # "US", "HK", "CN"
-    alert_price_threshold: Optional[float] = Field(default=None)  # Price threshold for alerts
+# ==================== Backward-Compatible CRUD Operations ====================
+# These functions delegate to the new repository layer for backward compatibility.
+# New code should use the repositories directly.
 
-
-class Transaction(SQLModel, table=True):
-    """Represents a buy/sell transaction for an asset."""
-    id: Optional[int] = Field(default=None, primary_key=True)
-    asset_id: int = Field(foreign_key="asset.id")
-    transaction_date: date = Field(index=True)
-    transaction_type: str  # "buy" or "sell"
-    quantity: float
-    price: float  # Price per unit at transaction time
-
-
-class UserPreferences(SQLModel, table=True):
-    """Stores user preferences and settings."""
-    id: Optional[int] = Field(default=None, primary_key=True)
-    email_address: Optional[str] = Field(default=None)
-    language: Optional[str] = Field(default="en")  # "en" or "zh"
-    base_currency: Optional[str] = Field(default="USD")  # "USD", "CNY", "HKD", etc.
-
-
-class AssetDailyMetric(SQLModel, table=True):
-    """
-    Daily technical metrics for an asset.
-    Stores calculated indicators for historical analysis and backtesting.
-    """
-    id: Optional[int] = Field(default=None, primary_key=True)
-    asset_id: int = Field(foreign_key="asset.id", index=True)
-    metric_date: date = Field(index=True)
-
-    # Price data
-    close_price: float
-
-    # Trend indicators
-    sma_20: Optional[float] = Field(default=None)
-    sma_50: Optional[float] = Field(default=None)
-    sma_200: Optional[float] = Field(default=None)
-
-    # Momentum indicators
-    rsi_14: Optional[float] = Field(default=None)
-    macd: Optional[float] = Field(default=None)
-    macd_signal: Optional[float] = Field(default=None)
-    macd_histogram: Optional[float] = Field(default=None)
-
-    # Volatility indicators
-    bollinger_upper: Optional[float] = Field(default=None)
-    bollinger_middle: Optional[float] = Field(default=None)
-    bollinger_lower: Optional[float] = Field(default=None)
-    bollinger_bandwidth: Optional[float] = Field(default=None)  # (upper - lower) / middle
-
-    # Volume indicators
-    volume: Optional[int] = Field(default=None)
-    volume_sma_20: Optional[float] = Field(default=None)
-    volume_ratio: Optional[float] = Field(default=None)  # volume / volume_sma_20
-
-    # Signal (calculated from all factors)
-    overall_signal: Optional[str] = Field(default=None)  # "STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"
-    confidence_score: Optional[int] = Field(default=None)  # 0-10
-
-    created_at: datetime = Field(default_factory=datetime.now)
-
-
-def init_db():
-    """Initialize the database and create all tables."""
-    SQLModel.metadata.create_all(engine)
-
-
-def get_session():
-    """Get a new database session."""
-    return Session(engine)
-
-
-# ==================== Asset Operations ====================
+# Asset Operations
 def add_asset(symbol: str, name: str, market_type: str, alert_price_threshold: Optional[float] = None) -> Asset:
     """Add a new asset to the database."""
-    with get_session() as session:
-        asset = Asset(
-            symbol=symbol,
-            name=name,
-            market_type=market_type,
-            alert_price_threshold=alert_price_threshold
-        )
-        session.add(asset)
-        session.commit()
-        session.refresh(asset)
-        return asset
+    return AssetRepository.add(symbol, name, market_type, alert_price_threshold)
 
 
-def get_all_assets() -> list[Asset]:
+def get_all_assets() -> List[Asset]:
     """Retrieve all assets from the database."""
-    with get_session() as session:
-        statement = select(Asset)
-        results = session.exec(statement)
-        return list(results.all())
+    return AssetRepository.get_all()
 
 
 def get_asset_by_id(asset_id: int) -> Optional[Asset]:
     """Retrieve an asset by its ID."""
-    with get_session() as session:
-        return session.get(Asset, asset_id)
+    return AssetRepository.get_by_id(asset_id)
 
 
 def get_asset_by_symbol(symbol: str) -> Optional[Asset]:
     """Retrieve an asset by symbol (case-insensitive)."""
-    with get_session() as session:
-        statement = select(Asset).where(Asset.symbol.ilike(symbol))
-        results = session.exec(statement)
-        return results.first()
+    return AssetRepository.get_by_symbol(symbol)
 
 
 def update_asset_alert_threshold(asset_id: int, alert_threshold: Optional[float]) -> Optional[Asset]:
     """Update the alert price threshold for an asset."""
-    with get_session() as session:
-        asset = session.get(Asset, asset_id)
-        if asset:
-            asset.alert_price_threshold = alert_threshold
-            session.add(asset)
-            session.commit()
-            session.refresh(asset)
-            return asset
-        return None
+    return AssetRepository.update_alert_threshold(asset_id, alert_threshold)
 
 
 def delete_asset(asset_id: int) -> bool:
-    """
-    Delete an asset and all its transactions.
-    Returns True if successful, False otherwise.
-    """
-    with get_session() as session:
-        try:
-            # First, delete all transactions for this asset
-            statement = select(Transaction).where(Transaction.asset_id == asset_id)
-            transactions = session.exec(statement).all()
-            for tx in transactions:
-                session.delete(tx)
-
-            # Then delete the asset
-            asset = session.get(Asset, asset_id)
-            if asset:
-                session.delete(asset)
-                session.commit()
-                return True
-            return False
-        except Exception as e:
-            session.rollback()
-            raise e
+    """Delete an asset and all its transactions."""
+    return AssetRepository.delete(asset_id)
 
 
-# ==================== Transaction Operations ====================
+# Transaction Operations
 def add_transaction(asset_id: int, transaction_date: date, transaction_type: str,
                    quantity: float, price: float) -> Transaction:
     """Add a new transaction to the database."""
-    with get_session() as session:
-        transaction = Transaction(
-            asset_id=asset_id,
-            transaction_date=transaction_date,
-            transaction_type=transaction_type,
-            quantity=quantity,
-            price=price
-        )
-        session.add(transaction)
-        session.commit()
-        session.refresh(transaction)
-        return transaction
+    return TransactionRepository.add(asset_id, transaction_date, transaction_type, quantity, price)
 
 
-def get_transactions_by_asset(asset_id: int) -> list[Transaction]:
+def get_transactions_by_asset(asset_id: int) -> List[Transaction]:
     """Retrieve all transactions for a specific asset."""
-    with get_session() as session:
-        statement = select(Transaction).where(Transaction.asset_id == asset_id)
-        results = session.exec(statement)
-        return list(results.all())
+    return TransactionRepository.get_by_asset(asset_id)
 
 
-def get_all_transactions() -> list[Transaction]:
+def get_all_transactions() -> List[Transaction]:
     """Retrieve all transactions from the database."""
-    with get_session() as session:
-        statement = select(Transaction)
-        results = session.exec(statement)
-        return list(results.all())
+    return TransactionRepository.get_all()
 
 
 def get_transaction_by_id(transaction_id: int) -> Optional[Transaction]:
     """Retrieve a transaction by its ID."""
-    with get_session() as session:
-        return session.get(Transaction, transaction_id)
+    return TransactionRepository.get_by_id(transaction_id)
 
 
 def update_transaction(transaction_id: int, transaction_date: Optional[date] = None,
                        transaction_type: Optional[str] = None,
                        quantity: Optional[float] = None,
                        price: Optional[float] = None) -> Optional[Transaction]:
-    """
-    Update an existing transaction.
-    Only updates fields that are provided (not None).
-    """
-    with get_session() as session:
-        transaction = session.get(Transaction, transaction_id)
-        if transaction:
-            if transaction_date is not None:
-                transaction.transaction_date = transaction_date
-            if transaction_type is not None:
-                transaction.transaction_type = transaction_type
-            if quantity is not None:
-                transaction.quantity = quantity
-            if price is not None:
-                transaction.price = price
-            session.add(transaction)
-            session.commit()
-            session.refresh(transaction)
-            return transaction
-        return None
+    """Update an existing transaction."""
+    return TransactionRepository.update(transaction_id, transaction_date, transaction_type, quantity, price)
 
 
 def delete_transaction(transaction_id: int) -> bool:
-    """
-    Delete a transaction by its ID.
-    Returns True if successful, False otherwise.
-    """
-    with get_session() as session:
-        try:
-            transaction = session.get(Transaction, transaction_id)
-            if transaction:
-                session.delete(transaction)
-                session.commit()
-                return True
-            return False
-        except Exception as e:
-            session.rollback()
-            raise e
+    """Delete a transaction by its ID."""
+    return TransactionRepository.delete(transaction_id)
 
 
-# ==================== AssetDailyMetric Operations ====================
+# AssetDailyMetric Operations
 def save_daily_metric(metric: AssetDailyMetric) -> AssetDailyMetric:
-    """
-    Save or update a daily metric record.
-    Uses upsert logic: if exists for asset_id + date, update; otherwise insert.
-    """
-    with get_session() as session:
-        # Check if metric already exists
-        statement = select(AssetDailyMetric).where(
-            AssetDailyMetric.asset_id == metric.asset_id,
-            AssetDailyMetric.metric_date == metric.metric_date
-        )
-        existing = session.exec(statement).first()
-
-        if existing:
-            # Update existing record
-            existing.close_price = metric.close_price
-            existing.sma_20 = metric.sma_20
-            existing.sma_50 = metric.sma_50
-            existing.sma_200 = metric.sma_200
-            existing.rsi_14 = metric.rsi_14
-            existing.macd = metric.macd
-            existing.macd_signal = metric.macd_signal
-            existing.macd_histogram = metric.macd_histogram
-            existing.bollinger_upper = metric.bollinger_upper
-            existing.bollinger_middle = metric.bollinger_middle
-            existing.bollinger_lower = metric.bollinger_lower
-            existing.bollinger_bandwidth = metric.bollinger_bandwidth
-            existing.volume = metric.volume
-            existing.volume_sma_20 = metric.volume_sma_20
-            existing.volume_ratio = metric.volume_ratio
-            existing.overall_signal = metric.overall_signal
-            existing.confidence_score = metric.confidence_score
-            session.add(existing)
-            session.commit()
-            session.refresh(existing)
-            return existing
-        else:
-            # Insert new record
-            session.add(metric)
-            session.commit()
-            session.refresh(metric)
-            return metric
+    """Save or update a daily metric record."""
+    return MetricRepository.save(metric)
 
 
 def get_latest_metric(asset_id: int) -> Optional[AssetDailyMetric]:
     """Get the most recent daily metric for an asset."""
-    with get_session() as session:
-        statement = select(AssetDailyMetric).where(
-            AssetDailyMetric.asset_id == asset_id
-        ).order_by(AssetDailyMetric.metric_date.desc()).limit(1)
-        return session.exec(statement).first()
+    return MetricRepository.get_latest(asset_id)
 
 
-def get_metrics_history(asset_id: int, days: int = 60) -> list[AssetDailyMetric]:
+def get_metrics_history(asset_id: int, days: int = 60) -> List[AssetDailyMetric]:
     """Get historical metrics for an asset."""
-    with get_session() as session:
-        statement = select(AssetDailyMetric).where(
-            AssetDailyMetric.asset_id == asset_id
-        ).order_by(AssetDailyMetric.metric_date.desc()).limit(days)
-        results = session.exec(statement)
-        return list(results.all())
+    return MetricRepository.get_history(asset_id, days)
 
 
 def get_metric_by_date(asset_id: int, metric_date: date) -> Optional[AssetDailyMetric]:
     """Get a specific metric by date."""
-    with get_session() as session:
-        statement = select(AssetDailyMetric).where(
-            AssetDailyMetric.asset_id == asset_id,
-            AssetDailyMetric.metric_date == metric_date
-        )
-        return session.exec(statement).first()
+    return MetricRepository.get_by_date(asset_id, metric_date)
 
 
-# ==================== UserPreferences Operations ====================
+# UserPreferences Operations
 def save_user_email(email: str) -> UserPreferences:
     """Save or update user email preferences."""
-    with get_session() as session:
-        statement = select(UserPreferences)
-        results = session.exec(statement)
-        prefs = results.first()
-
-        if prefs:
-            prefs.email_address = email
-            session.add(prefs)
-            session.commit()
-            session.refresh(prefs)
-            return prefs
-        else:
-            prefs = UserPreferences(email_address=email)
-            session.add(prefs)
-            session.commit()
-            session.refresh(prefs)
-            return prefs
+    return UserPreferencesRepository.save_email(email)
 
 
 def get_user_preferences() -> Optional[UserPreferences]:
     """Retrieve user preferences."""
-    with get_session() as session:
-        statement = select(UserPreferences)
-        results = session.exec(statement)
-        return results.first()
+    return UserPreferencesRepository.get()
 
 
 def save_user_language(language: str) -> UserPreferences:
     """Save or update user language preference."""
-    with get_session() as session:
-        statement = select(UserPreferences)
-        results = session.exec(statement)
-        prefs = results.first()
-
-        if prefs:
-            prefs.language = language
-            session.add(prefs)
-            session.commit()
-            session.refresh(prefs)
-            return prefs
-        else:
-            prefs = UserPreferences(language=language)
-            session.add(prefs)
-            session.commit()
-            session.refresh(prefs)
-            return prefs
+    return UserPreferencesRepository.save_language(language)
 
 
 def save_user_base_currency(base_currency: str) -> UserPreferences:
     """Save or update user base currency preference."""
-    with get_session() as session:
-        statement = select(UserPreferences)
-        results = session.exec(statement)
-        prefs = results.first()
-
-        if prefs:
-            prefs.base_currency = base_currency
-            session.add(prefs)
-            session.commit()
-            session.refresh(prefs)
-            return prefs
-        else:
-            prefs = UserPreferences(base_currency=base_currency)
-            session.add(prefs)
-            session.commit()
-            session.refresh(prefs)
-            return prefs
+    return UserPreferencesRepository.save_base_currency(base_currency)
 
 
-if __name__ == "__main__":
-    # Initialize database for testing
-    init_db()
-    print(f"Database initialized at {DB_FILE}")
+__all__ = [
+    # Engine functions
+    'get_engine',
+    'get_session',
+    'init_db',
+    # Models
+    'Asset',
+    'Transaction',
+    'UserPreferences',
+    'AssetDailyMetric',
+    # Asset operations
+    'add_asset',
+    'get_all_assets',
+    'get_asset_by_id',
+    'get_asset_by_symbol',
+    'update_asset_alert_threshold',
+    'delete_asset',
+    # Transaction operations
+    'add_transaction',
+    'get_transactions_by_asset',
+    'get_all_transactions',
+    'get_transaction_by_id',
+    'update_transaction',
+    'delete_transaction',
+    # Metric operations
+    'save_daily_metric',
+    'get_latest_metric',
+    'get_metrics_history',
+    'get_metric_by_date',
+    # UserPreferences operations
+    'save_user_email',
+    'get_user_preferences',
+    'save_user_language',
+    'save_user_base_currency',
+]

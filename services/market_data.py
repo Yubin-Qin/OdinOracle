@@ -2,6 +2,7 @@
 Market data service for fetching stock information and calculating technical indicators.
 Implements the Factor Pack with professional indicators.
 Uses pandas for calculations and caches results.
+Enhanced with tenacity for retry logic and resilience.
 """
 
 import yfinance as yf
@@ -12,6 +13,8 @@ from datetime import datetime, timedelta, date
 from functools import lru_cache
 from typing import Optional, Dict, List
 
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
 from services.common import normalize_symbol, calculate_signal
 
 logger = logging.getLogger(__name__)
@@ -20,23 +23,48 @@ logger = logging.getLogger(__name__)
 class MarketDataService:
     """
     Service for fetching market data and calculating technical indicators.
-    Implements professional-grade factor calculations.
+    Implements professional-grade factor calculations with retry logic.
     """
+
+    @staticmethod
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(Exception),
+        reraise=True
+    )
+    def _fetch_ticker_info(yf_symbol: str) -> Dict:
+        """Fetch ticker info with retry logic."""
+        ticker = yf.Ticker(yf_symbol)
+        return ticker.info
+
+    @staticmethod
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(Exception),
+        reraise=True
+    )
+    def _fetch_ticker_history(yf_symbol: str, period: str = None, start=None, end=None) -> pd.DataFrame:
+        """Fetch ticker history with retry logic."""
+        ticker = yf.Ticker(yf_symbol)
+        if start and end:
+            return ticker.history(start=start, end=end)
+        return ticker.history(period=period or "1d")
 
     @staticmethod
     @lru_cache(maxsize=256)
     def get_current_price(symbol: str, market_type: str) -> Optional[float]:
-        """Fetch current stock price with caching."""
+        """Fetch current stock price with caching and retry logic."""
         try:
             yf_symbol = normalize_symbol(symbol, market_type)
-            ticker = yf.Ticker(yf_symbol)
-            info = ticker.info
+            info = MarketDataService._fetch_ticker_info(yf_symbol)
 
             # Try multiple price fields
             price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('lastPrice')
 
             if price is None:
-                hist = ticker.history(period="1d")
+                hist = MarketDataService._fetch_ticker_history(yf_symbol, period="1d")
                 if not hist.empty:
                     price = hist['Close'].iloc[-1]
 
@@ -51,7 +79,7 @@ class MarketDataService:
     @staticmethod
     def get_historical_data(symbol: str, market_type: str, period_months: int = 6) -> Optional[pd.DataFrame]:
         """
-        Fetch historical price data.
+        Fetch historical price data with retry logic.
 
         Args:
             symbol: Stock symbol
@@ -63,11 +91,10 @@ class MarketDataService:
         """
         try:
             yf_symbol = normalize_symbol(symbol, market_type)
-            ticker = yf.Ticker(yf_symbol)
             end_date = datetime.now()
             start_date = end_date - timedelta(days=period_months * 30)
 
-            hist = ticker.history(start=start_date, end=end_date)
+            hist = MarketDataService._fetch_ticker_history(yf_symbol, start=start_date, end=end_date)
 
             if hist.empty:
                 return None
@@ -265,11 +292,10 @@ class MarketDataService:
 
     @staticmethod
     def get_stock_info(symbol: str, market_type: str) -> Optional[Dict]:
-        """Fetch comprehensive stock information."""
+        """Fetch comprehensive stock information with retry logic."""
         try:
             yf_symbol = normalize_symbol(symbol, market_type)
-            ticker = yf.Ticker(yf_symbol)
-            info = ticker.info
+            info = MarketDataService._fetch_ticker_info(yf_symbol)
 
             return {
                 'symbol': symbol,
@@ -307,8 +333,7 @@ class MarketDataService:
         """
         try:
             yf_symbol = normalize_symbol(symbol, market_type)
-            ticker = yf.Ticker(yf_symbol)
-            info = ticker.info
+            info = MarketDataService._fetch_ticker_info(yf_symbol)
 
             # Try to get previous close from info
             prev_close = info.get('previousClose')
@@ -316,7 +341,7 @@ class MarketDataService:
                 return float(prev_close)
 
             # Fallback: fetch 2 days of history and get the second to last close
-            hist = ticker.history(period="2d")
+            hist = MarketDataService._fetch_ticker_history(yf_symbol, period="2d")
             if len(hist) >= 2:
                 return float(hist['Close'].iloc[-2])
 
@@ -329,9 +354,15 @@ class MarketDataService:
 
     @staticmethod
     @lru_cache(maxsize=32)
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(Exception),
+        reraise=True
+    )
     def get_exchange_rate(from_currency: str, to_currency: str = "USD") -> Optional[float]:
         """
-        Fetch real-time exchange rate using yfinance.
+        Fetch real-time exchange rate using yfinance with retry logic.
 
         Args:
             from_currency: Source currency code (e.g., "USD", "HKD", "CNY")
@@ -378,4 +409,5 @@ class MarketDataService:
     def clear_cache():
         """Clear the LRU cache."""
         MarketDataService.get_current_price.cache_clear()
+        MarketDataService.get_exchange_rate.cache_clear()
         logger.info("Market data cache cleared")

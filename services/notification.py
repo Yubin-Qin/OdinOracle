@@ -1,14 +1,16 @@
 """
 Notification service for sending emails.
 Centralized SMTP handling for all email communications.
+Refactored to use centralized configuration.
 """
 
 import smtplib
-import os
 import logging
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional
+
+from config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -16,24 +18,22 @@ logger = logging.getLogger(__name__)
 class EmailService:
     """
     Service for sending emails via SMTP.
-    Configuration loaded from environment variables.
+    Configuration loaded from centralized config module.
     """
 
     def __init__(self):
-        """Initialize email service with configuration from environment."""
-        self.smtp_server = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
-        self.smtp_port = int(os.getenv('SMTP_PORT', '587'))
-        self.smtp_username = os.getenv('SMTP_USERNAME')
-        self.smtp_password = os.getenv('SMTP_PASSWORD')
-        self.from_email = os.getenv('FROM_EMAIL', self.smtp_username)
+        """Initialize email service with configuration from centralized config."""
+        settings = get_settings()
+        self.smtp_server = settings.smtp_server
+        self.smtp_port = settings.smtp_port
+        self.smtp_username = settings.smtp_username
+        self.smtp_password = settings.smtp_password
+        self.from_email = settings.email_from
 
     def is_configured(self) -> bool:
         """Check if email service is properly configured."""
-        return all([
-            self.smtp_username,
-            self.smtp_password,
-            self.from_email
-        ])
+        settings = get_settings()
+        return settings.is_email_configured
 
     def send_email(
         self,

@@ -1,13 +1,15 @@
 """
 LLM Engine - Model Factory and Aggressive Hedge Fund AI Persona.
 Supports OpenAI-compatible APIs with bilingual output (English/Chinese).
+Refactored to use centralized configuration.
 """
 
-import os
 from typing import Literal, Optional
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 import logging
+
+from config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +106,7 @@ class LLMClient:
     """
     Factory class for creating LLM clients with different backends.
     Supports bilingual output (English/Chinese).
+    Uses centralized configuration from config.py.
     """
 
     def __init__(
@@ -139,16 +142,17 @@ class LLMClient:
 
     def _create_llm(self, base_url: Optional[str], api_key: Optional[str]) -> ChatOpenAI:
         """Create a ChatOpenAI instance based on the mode."""
+        settings = get_settings()
+
         if self.mode == "cloud":
-            url = base_url or os.getenv("OPENAI_BASE_URL")
+            url = base_url or settings.openai_base_url
 
             if self.model_name:
                 model = self.model_name
             else:
-                env_model = os.getenv("OPENAI_MODEL")
-                model = env_model if env_model else None
+                model = settings.openai_model
 
-            key = api_key or os.getenv("OPENAI_API_KEY")
+            key = api_key or settings.openai_api_key
 
             if not key:
                 raise ValueError("API key not found. Set OPENAI_API_KEY environment variable.")
@@ -165,8 +169,8 @@ class LLMClient:
             )
 
         elif self.mode == "local":
-            model = self.model_name or os.getenv("LOCAL_MODEL", "qwen2.5:14b")
-            url = base_url or os.getenv("LOCAL_LLM_URL", "http://localhost:11434/v1")
+            model = self.model_name or settings.local_model
+            url = base_url or settings.local_llm_url
             key = api_key or "ollama"
 
             logger.info(f"Initializing Local LLM: {model} at {url}")

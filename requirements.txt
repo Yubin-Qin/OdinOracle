@@ -10,3 +10,8 @@ openai>=1.10.0
 python-dotenv>=1.0.0
 pandas>=2.0.0
 numpy>=1.20.0
+
+# New dependencies for enterprise refactoring
+alembic>=1.13.0
+pydantic-settings>=2.1.0
+tenacity>=8.2.0
