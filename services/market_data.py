@@ -3,6 +3,7 @@ Market data service for fetching stock information and calculating technical ind
 Implements the Factor Pack with professional indicators.
 Uses pandas for calculations and caches results.
 Enhanced with tenacity for retry logic and resilience.
+Optimized with concurrent batch fetching.
 """
 
 import yfinance as yf
@@ -11,7 +12,8 @@ import numpy as np
 import logging
 from datetime import datetime, timedelta, date
 from functools import lru_cache
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -411,3 +413,109 @@ class MarketDataService:
         MarketDataService.get_current_price.cache_clear()
         MarketDataService.get_exchange_rate.cache_clear()
         logger.info("Market data cache cleared")
+
+    @staticmethod
+    def get_current_prices_batch(
+        assets: List[Tuple[str, str]],
+        max_workers: int = 5
+    ) -> Dict[str, Optional[float]]:
+        """
+        Fetch current prices for multiple assets in parallel using ThreadPoolExecutor.
+
+        Args:
+            assets: List of (symbol, market_type) tuples
+            max_workers: Maximum number of concurrent threads (default: 5)
+
+        Returns:
+            Dictionary mapping symbol to price (or None if fetch failed)
+            Example: {'NVDA': 450.50, 'AAPL': 185.30, 'TSLA': None}
+
+        Example:
+            >>> assets = [('NVDA', 'US'), ('0700', 'HK'), ('600519', 'CN')]
+            >>> prices = MarketDataService.get_current_prices_batch(assets)
+            >>> print(prices)
+            {'NVDA': 450.50, '0700': 285.40, '600519': 1650.00}
+        """
+        if not assets:
+            return {}
+
+        results: Dict[str, Optional[float]] = {}
+
+        def fetch_single_price(asset_tuple: Tuple[str, str]) -> Tuple[str, Optional[float]]:
+            """Helper function to fetch price for a single asset."""
+            symbol, market_type = asset_tuple
+            try:
+                price = MarketDataService.get_current_price(symbol, market_type)
+                return symbol, price
+            except Exception as e:
+                logger.error(f"Error fetching price for {symbol}: {e}")
+                return symbol, None
+
+        # Use ThreadPoolExecutor for concurrent fetching
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_asset = {
+                executor.submit(fetch_single_price, asset): asset[0]
+                for asset in assets
+            }
+
+            # Collect results as they complete
+            for future in as_completed(future_to_asset):
+                symbol = future_to_asset[future]
+                try:
+                    _, price = future.result()
+                    results[symbol] = price
+                except Exception as e:
+                    logger.error(f"Exception fetching price for {symbol}: {e}")
+                    results[symbol] = None
+
+        logger.info(f"Batch price fetch completed: {len([p for p in results.values() if p is not None])}/{len(assets)} successful")
+        return results
+
+    @staticmethod
+    def get_stock_info_batch(
+        assets: List[Tuple[str, str]],
+        max_workers: int = 5
+    ) -> Dict[str, Optional[Dict]]:
+        """
+        Fetch stock info for multiple assets in parallel using ThreadPoolExecutor.
+
+        Args:
+            assets: List of (symbol, market_type) tuples
+            max_workers: Maximum number of concurrent threads (default: 5)
+
+        Returns:
+            Dictionary mapping symbol to info dict (or None if fetch failed)
+        """
+        if not assets:
+            return {}
+
+        results: Dict[str, Optional[Dict]] = {}
+
+        def fetch_single_info(asset_tuple: Tuple[str, str]) -> Tuple[str, Optional[Dict]]:
+            """Helper function to fetch info for a single asset."""
+            symbol, market_type = asset_tuple
+            try:
+                info = MarketDataService.get_stock_info(symbol, market_type)
+                return symbol, info
+            except Exception as e:
+                logger.error(f"Error fetching info for {symbol}: {e}")
+                return symbol, None
+
+        # Use ThreadPoolExecutor for concurrent fetching
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_asset = {
+                executor.submit(fetch_single_info, asset): asset[0]
+                for asset in assets
+            }
+
+            for future in as_completed(future_to_asset):
+                symbol = future_to_asset[future]
+                try:
+                    _, info = future.result()
+                    results[symbol] = info
+                except Exception as e:
+                    logger.error(f"Exception fetching info for {symbol}: {e}")
+                    results[symbol] = None
+
+        return results

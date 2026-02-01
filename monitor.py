@@ -4,7 +4,6 @@ Runs periodically to check stock prices and send email alerts.
 Refactored to use services layer.
 """
 
-import time
 import logging
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -30,6 +29,7 @@ def check_price_alerts():
     """
     Main job function to check all assets for price alerts.
     Called by the scheduler at configured intervals.
+    Optimized to use batch price fetching for improved performance.
     """
     logger.info("=" * 60)
     logger.info("Starting price alert check...")
@@ -57,24 +57,34 @@ def check_price_alerts():
         logger.info("No assets in database to monitor.")
         return
 
-    logger.info(f"Checking {len(assets)} assets for price alerts...")
+    # Filter assets that have alert thresholds set
+    assets_with_alerts = [a for a in assets if a.alert_price_threshold is not None]
+
+    if not assets_with_alerts:
+        logger.info("No assets with alert thresholds configured.")
+        return
+
+    logger.info(f"Checking {len(assets_with_alerts)} assets with price alerts...")
+
+    # Prepare asset list for batch fetching
+    asset_tuples = [(a.symbol, a.market_type) for a in assets_with_alerts]
+
+    # Fetch all prices in parallel using batch method
+    logger.info("Fetching prices in parallel...")
+    prices = MarketDataService.get_current_prices_batch(asset_tuples, max_workers=5)
 
     alerts_triggered = 0
+    assets_checked = 0
 
-    for asset in assets:
-        # Skip if no alert threshold set
-        if asset.alert_price_threshold is None:
-            logger.debug(f"No threshold set for {asset.symbol}, skipping...")
-            continue
-
-        # Fetch current price using MarketDataService
-        current_price = MarketDataService.get_current_price(asset.symbol, asset.market_type)
+    # Process results
+    for asset in assets_with_alerts:
+        current_price = prices.get(asset.symbol)
 
         if current_price is None:
             logger.warning(f"Could not fetch price for {asset.symbol}, skipping...")
-            # Add small delay to avoid rate limiting
-            time.sleep(0.5)
             continue
+
+        assets_checked += 1
 
         # Check if price is below threshold
         if current_price < asset.alert_price_threshold:
@@ -99,11 +109,8 @@ def check_price_alerts():
                 f"{asset.symbol}: ${current_price:.2f} (threshold: ${asset.alert_price_threshold:.2f}) - OK"
             )
 
-        # Small delay between requests to be respectful to API
-        time.sleep(1)
-
     logger.info("=" * 60)
-    logger.info(f"Price alert check complete. Alerts triggered: {alerts_triggered}")
+    logger.info(f"Price alert check complete. Checked: {assets_checked}, Alerts triggered: {alerts_triggered}")
     logger.info("=" * 60)
 
 

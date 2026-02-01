@@ -31,6 +31,39 @@ from services.notification import EmailService
 from services.portfolio import PortfolioService
 from services.common import normalize_symbol, infer_market_type
 
+# ==================== CACHE MANAGEMENT ====================
+@st.cache_data(ttl=120)
+def cached_portfolio_net_worth(base_currency: str):
+    """Cached portfolio net worth calculation (2 minute TTL)."""
+    return PortfolioService.calculate_net_worth(base_currency, use_batch_fetch=True)
+
+
+@st.cache_data(ttl=300)
+def cached_stock_info(symbol: str, market_type: str):
+    """Cached stock info fetching (5 minute TTL)."""
+    return MarketDataService.get_stock_info(symbol, market_type)
+
+
+@st.cache_data(ttl=180)
+def cached_latest_metric(asset_id: int):
+    """Cached latest metric for an asset (3 minute TTL)."""
+    return get_latest_metric(asset_id)
+
+
+def clear_portfolio_cache():
+    """Clear portfolio-related caches when data changes."""
+    cached_portfolio_net_worth.clear()
+    logger.info("Portfolio cache cleared")
+
+
+def clear_all_caches():
+    """Clear all application caches."""
+    cached_portfolio_net_worth.clear()
+    cached_stock_info.clear()
+    cached_latest_metric.clear()
+    MarketDataService.clear_cache()
+    logger.info("All caches cleared")
+
 # Load environment variables
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -427,7 +460,8 @@ def render_portfolio_summary():
     base_currency = prefs.base_currency if prefs else "USD"
     currency_symbol = {"USD": "$", "CNY": "¥", "HKD": "HK$"}.get(base_currency, "$")
 
-    portfolio = PortfolioService.calculate_net_worth(base_currency)
+    # Use cached portfolio calculation for better performance
+    portfolio = cached_portfolio_net_worth(base_currency)
 
     if portfolio['total_value'] == 0:
         st.info(T('no_holdings'))
@@ -577,6 +611,7 @@ def render_manage_portfolio():
                         # Fetch and store metrics
                         MarketDataService.fetch_and_store_daily_metrics(asset.id, symbol, asset.market_type)
                         st.success(f"✅ Added {quantity} shares of {symbol} @ ${avg_cost:.2f}!")
+                        clear_portfolio_cache()  # Clear cache after adding transaction
                         st.rerun()
 
     # Edit/Delete Positions Section
@@ -622,6 +657,7 @@ def render_manage_portfolio():
                                             )
                                             st.success(f"✅ Transaction updated!")
                                             st.session_state[f"editing_{tx.id}"] = False
+                                            clear_portfolio_cache()  # Clear cache after updating transaction
                                             st.rerun()
                                     with col_cancel:
                                         if st.form_submit_button("Cancel", use_container_width=True):
@@ -641,6 +677,7 @@ def render_manage_portfolio():
                                         delete_transaction(tx.id)
                                         st.success("✅ Transaction deleted!")
                                         st.session_state[f"confirm_delete_{tx.id}"] = False
+                                        clear_portfolio_cache()  # Clear cache after deleting transaction
                                         st.rerun()
                                 with col_no:
                                     if st.button("Cancel", key=f"confirm_no_{tx.id}"):
@@ -674,6 +711,7 @@ def render_manage_portfolio():
                                 if delete_asset(asset.id):
                                     st.success(f"✅ Asset {asset.symbol} deleted!")
                                     st.session_state[f"confirm_delete_asset_{asset.id}"] = False
+                                    clear_portfolio_cache()  # Clear cache after deleting asset
                                     st.rerun()
                         with col_no:
                             if st.button("Cancel", key=f"confirm_no_asset_{asset.id}"):

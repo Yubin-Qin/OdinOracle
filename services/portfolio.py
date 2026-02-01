@@ -171,13 +171,14 @@ class PortfolioService:
         }
 
     @staticmethod
-    def calculate_net_worth(base_currency: Optional[str] = None) -> Dict:
+    def calculate_net_worth(base_currency: Optional[str] = None, use_batch_fetch: bool = True) -> Dict:
         """
         Calculate total portfolio net worth and summary statistics.
         Converts all asset values to base currency for accurate totals.
 
         Args:
             base_currency: Base currency for calculation (default: from user preferences or "USD")
+            use_batch_fetch: If True, use parallel batch fetching for prices (faster)
 
         Returns:
             Dictionary with portfolio summary in base currency
@@ -188,6 +189,12 @@ class PortfolioService:
             base_currency = prefs.base_currency if prefs else "USD"
 
         assets = get_all_assets()
+
+        # Use optimized batch fetching if enabled
+        if use_batch_fetch and len(assets) > 1:
+            return PortfolioService._calculate_net_worth_batch(assets, base_currency)
+
+        # Fall back to sequential processing
         holdings = []
         total_value_base_ccy = 0.0
         total_cost_base_ccy = 0.0
@@ -212,6 +219,160 @@ class PortfolioService:
             'total_pnl_pct': round(total_pnl_pct, 2),
             'daily_pnl': round(total_daily_pnl_base_ccy, 2),
             'holdings': holdings
+        }
+
+    @staticmethod
+    def _calculate_net_worth_batch(assets: List, base_currency: str) -> Dict:
+        """
+        Optimized portfolio calculation using batch price fetching.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # First, calculate all holdings data except current prices
+        holdings_data = []
+        asset_price_map = {}
+
+        for asset in assets:
+            transactions = get_transactions_by_asset(asset.id)
+            if not transactions:
+                continue
+
+            # Calculate quantity and cost basis (FIFO)
+            transactions_sorted = sorted(transactions, key=lambda x: x.transaction_date)
+            total_quantity = 0.0
+            total_cost = 0.0
+            buy_queue = []
+
+            for tx in transactions_sorted:
+                if tx.transaction_type == 'buy':
+                    buy_queue.append((tx.quantity, tx.price))
+                    total_quantity += tx.quantity
+                    total_cost += tx.quantity * tx.price
+                elif tx.transaction_type == 'sell':
+                    remaining_to_sell = tx.quantity
+                    while remaining_to_sell > 0 and buy_queue:
+                        qty, price = buy_queue[0]
+                        if qty <= remaining_to_sell:
+                            buy_queue.pop(0)
+                            total_cost -= qty * price
+                            remaining_to_sell -= qty
+                        else:
+                            buy_queue[0] = (qty - remaining_to_sell, price)
+                            total_cost -= remaining_to_sell * price
+                            remaining_to_sell = 0
+                    total_quantity -= tx.quantity
+
+            if total_quantity > 0:
+                asset_currency = MARKET_CURRENCY_MAP.get(asset.market_type, "USD")
+                holdings_data.append({
+                    'asset': asset,
+                    'quantity': total_quantity,
+                    'total_cost': total_cost,
+                    'currency': asset_currency
+                })
+                asset_price_map[asset.symbol] = (asset.market_type, asset_currency)
+
+        # Batch fetch all prices in parallel
+        if holdings_data:
+            price_tuples = [(h['asset'].symbol, h['asset'].market_type) for h in holdings_data]
+            prices = MarketDataService.get_current_prices_batch(price_tuples, max_workers=5)
+
+            # Also fetch previous closes in batch
+            prev_closes = {}
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                future_to_symbol = {
+                    executor.submit(
+                        MarketDataService.get_previous_close,
+                        h['asset'].symbol,
+                        h['asset'].market_type
+                    ): h['asset'].symbol
+                    for h in holdings_data
+                }
+                for future in as_completed(future_to_symbol):
+                    symbol = future_to_symbol[future]
+                    try:
+                        prev_closes[symbol] = future.result()
+                    except Exception:
+                        prev_closes[symbol] = None
+
+            # Calculate final values
+            holdings = []
+            total_value_base_ccy = 0.0
+            total_cost_base_ccy = 0.0
+            total_daily_pnl_base_ccy = 0.0
+
+            for h in holdings_data:
+                asset = h['asset']
+                quantity = h['quantity']
+                total_cost = h['total_cost']
+                asset_currency = h['currency']
+
+                current_price = prices.get(asset.symbol, 0.0) or 0.0
+                previous_close = prev_closes.get(asset.symbol)
+
+                avg_cost = total_cost / quantity if quantity > 0 else 0.0
+                current_value_asset_ccy = quantity * current_price
+                pnl_asset_ccy = current_value_asset_ccy - total_cost
+                pnl_pct = (pnl_asset_ccy / total_cost * 100) if total_cost > 0 else 0.0
+
+                daily_pnl_asset_ccy = 0.0
+                if previous_close and quantity > 0:
+                    daily_pnl_asset_ccy = (current_price - previous_close) * quantity
+
+                exchange_rate = PortfolioService._get_currency_rate(asset_currency, base_currency)
+
+                current_value_base_ccy = current_value_asset_ccy * exchange_rate
+                total_cost_base_ccy_local = total_cost * exchange_rate
+                pnl_base_ccy = pnl_asset_ccy * exchange_rate
+                daily_pnl_base_ccy = daily_pnl_asset_ccy * exchange_rate
+
+                holdings.append({
+                    'asset_id': asset.id,
+                    'symbol': asset.symbol,
+                    'name': asset.name,
+                    'market_type': asset.market_type,
+                    'currency': asset_currency,
+                    'quantity': round(quantity, 4),
+                    'avg_cost': round(avg_cost, 2),
+                    'total_cost': round(total_cost, 2),
+                    'total_cost_base': round(total_cost_base_ccy_local, 2),
+                    'current_price': round(current_price, 2),
+                    'previous_close': round(previous_close, 2) if previous_close else None,
+                    'current_value': round(current_value_asset_ccy, 2),
+                    'current_value_base': round(current_value_base_ccy, 2),
+                    'pnl': round(pnl_asset_ccy, 2),
+                    'pnl_base': round(pnl_base_ccy, 2),
+                    'pnl_pct': round(pnl_pct, 2),
+                    'daily_pnl': round(daily_pnl_asset_ccy, 2),
+                    'daily_pnl_base': round(daily_pnl_base_ccy, 2),
+                    'exchange_rate': round(exchange_rate, 4) if exchange_rate != 1.0 else None,
+                })
+
+                total_value_base_ccy += current_value_base_ccy
+                total_cost_base_ccy += total_cost_base_ccy_local
+                total_daily_pnl_base_ccy += daily_pnl_base_ccy
+
+            total_pnl = total_value_base_ccy - total_cost_base_ccy
+            total_pnl_pct = (total_pnl / total_cost_base_ccy * 100) if total_cost_base_ccy > 0 else 0.0
+
+            return {
+                'base_currency': base_currency,
+                'total_value': round(total_value_base_ccy, 2),
+                'total_cost': round(total_cost_base_ccy, 2),
+                'total_pnl': round(total_pnl, 2),
+                'total_pnl_pct': round(total_pnl_pct, 2),
+                'daily_pnl': round(total_daily_pnl_base_ccy, 2),
+                'holdings': holdings
+            }
+
+        return {
+            'base_currency': base_currency,
+            'total_value': 0.0,
+            'total_cost': 0.0,
+            'total_pnl': 0.0,
+            'total_pnl_pct': 0.0,
+            'daily_pnl': 0.0,
+            'holdings': []
         }
 
     @staticmethod
