@@ -2,10 +2,10 @@
 .env
 
 # Database
-*.db
+*.db*
 *.sqlite
 *.sqlite3
-*.db*
+
 
 # Python
 __pycache__/
